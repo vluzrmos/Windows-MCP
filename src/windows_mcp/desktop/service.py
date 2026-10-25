@@ -293,14 +293,19 @@ class Desktop:
                 stage_started_at = perf_counter()
 
             if max_image_size:
+                resolved_max_size = (
+                    max_image_size(screenshot.width, screenshot.height)
+                    if callable(max_image_size)
+                    else max_image_size
+                )
                 scale_width = (
-                    max_image_size.width / screenshot.width
-                    if screenshot.width > max_image_size.width
+                    resolved_max_size.width / screenshot.width
+                    if screenshot.width > resolved_max_size.width
                     else 1.0
                 )
                 scale_height = (
-                    max_image_size.height / screenshot.height
-                    if screenshot.height > max_image_size.height
+                    resolved_max_size.height / screenshot.height
+                    if screenshot.height > resolved_max_size.height
                     else 1.0
                 )
                 scale = min(scale, scale_width, scale_height)

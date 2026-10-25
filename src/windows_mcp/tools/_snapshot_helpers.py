@@ -10,7 +10,7 @@ import logging
 import os
 import time
 
-from typing import Literal
+from typing import Callable, Literal
 from fastmcp.utilities.types import Image
 from textwrap import dedent
 from windows_mcp.desktop.service import Desktop, Size
@@ -21,6 +21,9 @@ logger = logging.getLogger(__name__)
 
 MAX_IMAGE_WIDTH, MAX_IMAGE_HEIGHT = 1920, 1080
 COMPACT_IMAGE_WIDTH, COMPACT_IMAGE_HEIGHT = 1280, 720
+COMPACT_4K_IMAGE_WIDTH, COMPACT_4K_IMAGE_HEIGHT = 1920, 1080
+NORMAL_4K_IMAGE_WIDTH, NORMAL_4K_IMAGE_HEIGHT = 2560, 1440
+UHD_THRESHOLD_WIDTH, UHD_THRESHOLD_HEIGHT = 3840, 2160
 COMPACT_JPEG_QUALITY = 95
 
 ResolutionMode = Literal["compact", "normal"]
@@ -33,6 +36,17 @@ def _normalize_resolution(value: str | None) -> ResolutionMode:
     if normalized in {"normal", "full", "high", "1080p"}:
         return "normal"
     return "compact"
+
+
+def _resolve_max_image_size(resolution_mode: ResolutionMode, width: int, height: int) -> Size:
+    is_4k_or_above = width >= UHD_THRESHOLD_WIDTH or height >= UHD_THRESHOLD_HEIGHT
+    if resolution_mode == "compact":
+        if is_4k_or_above:
+            return Size(width=COMPACT_4K_IMAGE_WIDTH, height=COMPACT_4K_IMAGE_HEIGHT)
+        return Size(width=COMPACT_IMAGE_WIDTH, height=COMPACT_IMAGE_HEIGHT)
+    if is_4k_or_above:
+        return Size(width=NORMAL_4K_IMAGE_WIDTH, height=NORMAL_4K_IMAGE_HEIGHT)
+    return Size(width=MAX_IMAGE_WIDTH, height=MAX_IMAGE_HEIGHT)
 
 
 def _screenshot_scale() -> float:
@@ -88,12 +102,10 @@ def capture_desktop_state(
         raise ValueError("use_dom=True requires use_ui_tree=True")
 
     resolution_mode = _normalize_resolution(resolution)
-    if resolution_mode == "compact":
-        max_size = Size(width=COMPACT_IMAGE_WIDTH, height=COMPACT_IMAGE_HEIGHT)
-        image_format = "jpeg"
-    else:
-        max_size = Size(width=MAX_IMAGE_WIDTH, height=MAX_IMAGE_HEIGHT)
-        image_format = "png"
+    image_format = "jpeg" if resolution_mode == "compact" else "png"
+    max_size_resolver: Callable[[int, int], Size] = (
+        lambda w, h: _resolve_max_image_size(resolution_mode, w, h)
+    )
 
     display_indices = Desktop.parse_display_selection(display)
 
@@ -111,7 +123,7 @@ def capture_desktop_state(
         grid_lines=grid_lines,
         display_indices=display_indices,
         region=region,
-        max_image_size=max_size,
+        max_image_size=max_size_resolver,
     )
     if profile_enabled:
         desktop_state_ms = (time.perf_counter() - stage_started_at) * 1000

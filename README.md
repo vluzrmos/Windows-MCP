@@ -41,8 +41,8 @@ This fork includes security, privacy, and UX improvements over the upstream repo
    - Disables the orange-red capture flash overlay (`flash_overlay.py`) by default so only the primary blue AI control HUD indicates active agent operation.
 5. **Dual Screenshot Resolution Modes (`resolution="compact" | "normal"`):**
    - Added `resolution` parameter to both `Snapshot` and `Screenshot` tools (`src/windows_mcp/tools/snapshot.py` and `src/windows_mcp/tools/_snapshot_helpers.py`).
-   - **`compact` (Default):** Downscales screenshots to up to `1280x720` (720p) and encodes as JPEG (`quality=95`, `optimize=True`), reducing pixel count by ~55% and payload size by ~80% while preserving native `1920x1080` UI Tree coordinates and automatic `Screenshot Coordinate Scale` metadata (`1.5x`).
-   - **`normal`:** Captures up to `1920x1080` (1080p) lossless PNG when fine visual detail is needed.
+   - **`compact` (Default):** Downscales standard/QHD displays to `1280x720` (720p) and 4K+ (`>=3840x2160`) displays to `1920x1080` (1080p), encoding as JPEG (`quality=95`, `optimize=True`). Reduces pixel count by ~55–75% and payload size by ~80% while preserving native UI Tree coordinates and automatic `Screenshot Coordinate Scale` metadata.
+   - **`normal`:** Captures up to `1920x1080` (1080p) lossless PNG on standard displays and up to `2560x1440` (1440p) lossless PNG on 4K+ displays when fine visual detail is needed.
 6. **Python 3.13+ Compatibility:**
    - Relaxed `requires-python` in `pyproject.toml` from `>=3.14` to `>=3.13`.
 
