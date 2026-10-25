@@ -15,6 +15,11 @@ from fastmcp.utilities.types import Image
 from textwrap import dedent
 from windows_mcp.desktop.service import Desktop, Size
 from windows_mcp.desktop.utils import remove_private_use_chars, repair_surrogates
+from windows_mcp.tools._local_vision import (
+    _get_vision_settings,
+    run_openai_vision_llm,
+    run_winocr,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -27,6 +32,21 @@ UHD_THRESHOLD_WIDTH, UHD_THRESHOLD_HEIGHT = 3840, 2160
 COMPACT_JPEG_QUALITY = 95
 
 ResolutionMode = Literal["compact", "normal"]
+VisionMode = Literal["image", "winocr", "llm", "winocr+llm"]
+
+
+def _normalize_vision_mode(value: str | None) -> VisionMode:
+    if value is None or not str(value).strip():
+        default_mode = _get_vision_settings().get("mode") or "image"
+        value = default_mode
+    normalized = str(value).strip().lower()
+    if normalized in {"winocr", "ocr"}:
+        return "winocr"
+    if normalized in {"llm", "vlm", "openai"}:
+        return "llm"
+    if normalized in {"winocr+llm", "ocr+llm", "both", "hybrid"}:
+        return "winocr+llm"
+    return "image"
 
 
 def _normalize_resolution(value: str | None) -> ResolutionMode:
@@ -90,6 +110,11 @@ def capture_desktop_state(
     region: list[int] | None,
     tool_name: str,
     resolution: str | None = "compact",
+    vision_mode: str | None = None,
+    vision_prompt: str | None = None,
+    llm_url: str | None = None,
+    llm_token: str | None = None,
+    llm_model: str | None = None,
 ):
     profile_enabled = _snapshot_profile_enabled()
     profile_started_at = time.perf_counter()
@@ -100,6 +125,11 @@ def capture_desktop_state(
 
     if use_dom and not use_ui_tree:
         raise ValueError("use_dom=True requires use_ui_tree=True")
+
+    resolved_vision_mode = _normalize_vision_mode(vision_mode)
+    # If caller specified winocr/llm vision_mode explicitly, ensure screenshot is captured
+    if vision_mode and resolved_vision_mode != "image":
+        use_vision = True
 
     resolution_mode = _normalize_resolution(resolution)
     image_format = "jpeg" if resolution_mode == "compact" else "png"
@@ -141,27 +171,77 @@ def capture_desktop_state(
         stage_started_at = time.perf_counter()
 
     screenshot_bytes = None
+    local_vision_data: dict[str, object] | None = None
     if use_vision and desktop_state.screenshot is not None:
-        buffered = io.BytesIO()
         pil_img = desktop_state.screenshot
-        if image_format == "jpeg":
-            if pil_img.mode not in ("RGB", "L"):
-                pil_img = pil_img.convert("RGB")
-            pil_img.save(buffered, format="JPEG", quality=COMPACT_JPEG_QUALITY, optimize=True)
-        else:
-            pil_img.save(buffered, format="PNG")
-        screenshot_bytes = buffered.getvalue()
-        buffered.close()
+        scale = desktop_state.screenshot_scale or 1.0
+        coord_scale = round(1.0 / scale, 6) if scale > 0 else 1.0
+        region_offset = (0, 0)
+        if desktop_state.screenshot_region is not None:
+            region_offset = (
+                int(desktop_state.screenshot_region.left),
+                int(desktop_state.screenshot_region.top),
+            )
+
+        if resolved_vision_mode in ("image", "llm", "winocr+llm"):
+            buffered = io.BytesIO()
+            if image_format == "jpeg":
+                rgb_img = pil_img.convert("RGB") if pil_img.mode not in ("RGB", "L") else pil_img
+                rgb_img.save(buffered, format="JPEG", quality=COMPACT_JPEG_QUALITY, optimize=True)
+            else:
+                pil_img.save(buffered, format="PNG")
+            screenshot_bytes = buffered.getvalue()
+            buffered.close()
+
+        if resolved_vision_mode == "winocr":
+            local_vision_data = run_winocr(
+                pil_img, coord_scale=coord_scale, region_offset=region_offset
+            )
+            screenshot_bytes = None
+        elif resolved_vision_mode == "llm":
+            local_vision_data = run_openai_vision_llm(
+                screenshot_bytes or b"",
+                image_format=image_format,
+                prompt=vision_prompt,
+                llm_url=llm_url,
+                llm_token=llm_token,
+                llm_model=llm_model,
+                coord_scale=coord_scale,
+                region_offset=region_offset,
+            )
+            screenshot_bytes = None
+        elif resolved_vision_mode == "winocr+llm":
+            ocr_res = run_winocr(
+                pil_img, coord_scale=coord_scale, region_offset=region_offset
+            )
+            llm_res = run_openai_vision_llm(
+                screenshot_bytes or b"",
+                image_format=image_format,
+                prompt=vision_prompt,
+                llm_url=llm_url,
+                llm_token=llm_token,
+                llm_model=llm_model,
+                coord_scale=coord_scale,
+                region_offset=region_offset,
+            )
+            local_vision_data = {
+                "backend": "winocr+llm",
+                "winocr": ocr_res,
+                "llm": llm_res,
+            }
+            screenshot_bytes = None
+
     if profile_enabled:
         screenshot_encode_ms = (time.perf_counter() - stage_started_at) * 1000
         logger.info(
-            "%s profile: desktop_state_ms=%.1f metadata_render_ms=%.1f encode_ms=%.1f total_ms=%.1f resolution=%s use_vision=%s use_dom=%s use_ui_tree=%s use_annotation=%s display=%s",
+            "%s profile: desktop_state_ms=%.1f metadata_render_ms=%.1f encode_ms=%.1f total_ms=%.1f resolution=%s vision_mode=%s use_vision=%s use_dom=%s use_ui_tree=%s use_annotation=%s display=%s",
             tool_name,
             desktop_state_ms,
             metadata_render_ms,
             screenshot_encode_ms,
             (time.perf_counter() - profile_started_at) * 1000,
             resolution_mode,
+            resolved_vision_mode,
             use_vision,
             use_dom,
             use_ui_tree,
@@ -181,6 +261,8 @@ def capture_desktop_state(
         "screenshot_bytes": screenshot_bytes,
         "screenshot_format": image_format,
         "resolution_mode": resolution_mode,
+        "vision_mode": resolved_vision_mode,
+        "local_vision_data": local_vision_data,
         "use_ui_tree": use_ui_tree,
     }
 
@@ -282,6 +364,12 @@ def build_snapshot_response(
 
     UI Tree:
     {semantic_tree or "No elements found."}''')
+
+    local_vision_data = capture_result.get("local_vision_data")
+    if local_vision_data is not None:
+        vision_json = json.dumps(local_vision_data, ensure_ascii=False, indent=2)
+        vision_json = repair_surrogates(remove_private_use_chars(vision_json))
+        response_text += f"\n\nLocal Vision Output ({capture_result.get('vision_mode')}):\n{vision_json}"
 
     response = [response_text]
     if screenshot_bytes:

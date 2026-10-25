@@ -50,11 +50,21 @@ class ControlConfig:
 
 
 @dataclass
+class VisionConfig:
+    mode: str = "image"  # "image" | "winocr" | "llm" | "winocr+llm"
+    llm_base_url: str | None = None
+    llm_api_key: str | None = None
+    llm_model: str | None = None
+    ocr_lang: str = "pt-BR"
+
+
+@dataclass
 class WindowsMCPConfig:
     server: ServerConfig = field(default_factory=ServerConfig)
     security: SecurityConfig = field(default_factory=SecurityConfig)
     tools: ToolsConfig = field(default_factory=ToolsConfig)
     control: ControlConfig = field(default_factory=ControlConfig)
+    vision: VisionConfig = field(default_factory=VisionConfig)
     source_path: Path | None = None
 
 
@@ -197,6 +207,18 @@ def load_config(path: Path | None) -> WindowsMCPConfig:
                 raise ValueError(f"control.{key} must be between 40 and 2000")
             setattr(cfg.control, key, value)
 
+    vision = data.get("vision", {})
+    if "mode" in vision:
+        cfg.vision.mode = _strict_string(vision["mode"], "vision.mode")
+    if "llm_base_url" in vision:
+        cfg.vision.llm_base_url = _strict_string(vision["llm_base_url"], "vision.llm_base_url") or None
+    if "llm_api_key" in vision:
+        cfg.vision.llm_api_key = _strict_string(vision["llm_api_key"], "vision.llm_api_key") or None
+    if "llm_model" in vision:
+        cfg.vision.llm_model = _strict_string(vision["llm_model"], "vision.llm_model") or None
+    if "ocr_lang" in vision:
+        cfg.vision.ocr_lang = _strict_string(vision["ocr_lang"], "vision.ocr_lang") or "pt-BR"
+
     cfg.source_path = path
     return cfg
 
@@ -259,5 +281,20 @@ def write_config(cfg: WindowsMCPConfig, path: Path) -> None:
         control_lines.append(f"idle_timeout_seconds = {ctrl.idle_timeout_seconds}")
     if control_lines:
         lines += ["[control]", *control_lines, ""]
+
+    vis, default_vis = cfg.vision, VisionConfig()
+    vision_lines: list[str] = []
+    if vis.mode != default_vis.mode:
+        vision_lines.append(f'mode = "{vis.mode}"')
+    if vis.llm_base_url:
+        vision_lines.append(f'llm_base_url = "{vis.llm_base_url}"')
+    if vis.llm_api_key:
+        vision_lines.append(f'llm_api_key = "{vis.llm_api_key}"')
+    if vis.llm_model:
+        vision_lines.append(f'llm_model = "{vis.llm_model}"')
+    if vis.ocr_lang != default_vis.ocr_lang:
+        vision_lines.append(f'ocr_lang = "{vis.ocr_lang}"')
+    if vision_lines:
+        lines += ["[vision]", *vision_lines, ""]
 
     path.write_text("\n".join(lines), encoding="utf-8")
