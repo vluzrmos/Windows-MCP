@@ -32,7 +32,7 @@ def _get_vision_settings() -> dict[str, str | None]:
     mode = (
         os.getenv("WINDOWS_MCP_VISION_MODE")
         or (cfg_vision.mode if cfg_vision else None)
-        or "image"
+        or "winocr"
     )
     llm_base_url = (
         os.getenv("WINDOWS_MCP_LLM_BASE_URL")

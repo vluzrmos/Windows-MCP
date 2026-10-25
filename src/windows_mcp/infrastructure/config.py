@@ -51,7 +51,7 @@ class ControlConfig:
 
 @dataclass
 class VisionConfig:
-    mode: str = "image"  # "image" | "winocr" | "llm" | "winocr+llm"
+    mode: str = "winocr"  # "image" | "winocr" | "llm" | "winocr+llm"
     llm_base_url: str | None = None
     llm_api_key: str | None = None
     llm_model: str | None = None
