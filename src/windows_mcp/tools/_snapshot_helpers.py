@@ -10,6 +10,7 @@ import logging
 import os
 import time
 
+from typing import Literal
 from fastmcp.utilities.types import Image
 from textwrap import dedent
 from windows_mcp.desktop.service import Desktop, Size
@@ -19,6 +20,19 @@ from windows_mcp.desktop.utils import remove_private_use_chars, repair_surrogate
 logger = logging.getLogger(__name__)
 
 MAX_IMAGE_WIDTH, MAX_IMAGE_HEIGHT = 1920, 1080
+COMPACT_IMAGE_WIDTH, COMPACT_IMAGE_HEIGHT = 1280, 720
+COMPACT_JPEG_QUALITY = 95
+
+ResolutionMode = Literal["compact", "normal"]
+
+
+def _normalize_resolution(value: str | None) -> ResolutionMode:
+    if value is None:
+        return "compact"
+    normalized = str(value).strip().lower()
+    if normalized in {"normal", "full", "high", "1080p"}:
+        return "normal"
+    return "compact"
 
 
 def _screenshot_scale() -> float:
@@ -61,6 +75,7 @@ def capture_desktop_state(
     display: list[int] | None,
     region: list[int] | None,
     tool_name: str,
+    resolution: str | None = "compact",
 ):
     profile_enabled = _snapshot_profile_enabled()
     profile_started_at = time.perf_counter()
@@ -71,6 +86,14 @@ def capture_desktop_state(
 
     if use_dom and not use_ui_tree:
         raise ValueError("use_dom=True requires use_ui_tree=True")
+
+    resolution_mode = _normalize_resolution(resolution)
+    if resolution_mode == "compact":
+        max_size = Size(width=COMPACT_IMAGE_WIDTH, height=COMPACT_IMAGE_HEIGHT)
+        image_format = "jpeg"
+    else:
+        max_size = Size(width=MAX_IMAGE_WIDTH, height=MAX_IMAGE_HEIGHT)
+        image_format = "png"
 
     display_indices = Desktop.parse_display_selection(display)
 
@@ -88,7 +111,7 @@ def capture_desktop_state(
         grid_lines=grid_lines,
         display_indices=display_indices,
         region=region,
-        max_image_size=Size(width=MAX_IMAGE_WIDTH, height=MAX_IMAGE_HEIGHT),
+        max_image_size=max_size,
     )
     if profile_enabled:
         desktop_state_ms = (time.perf_counter() - stage_started_at) * 1000
@@ -108,18 +131,25 @@ def capture_desktop_state(
     screenshot_bytes = None
     if use_vision and desktop_state.screenshot is not None:
         buffered = io.BytesIO()
-        desktop_state.screenshot.save(buffered, format="PNG")
+        pil_img = desktop_state.screenshot
+        if image_format == "jpeg":
+            if pil_img.mode not in ("RGB", "L"):
+                pil_img = pil_img.convert("RGB")
+            pil_img.save(buffered, format="JPEG", quality=COMPACT_JPEG_QUALITY, optimize=True)
+        else:
+            pil_img.save(buffered, format="PNG")
         screenshot_bytes = buffered.getvalue()
         buffered.close()
     if profile_enabled:
         screenshot_encode_ms = (time.perf_counter() - stage_started_at) * 1000
         logger.info(
-            "%s profile: desktop_state_ms=%.1f metadata_render_ms=%.1f png_encode_ms=%.1f total_ms=%.1f use_vision=%s use_dom=%s use_ui_tree=%s use_annotation=%s display=%s",
+            "%s profile: desktop_state_ms=%.1f metadata_render_ms=%.1f encode_ms=%.1f total_ms=%.1f resolution=%s use_vision=%s use_dom=%s use_ui_tree=%s use_annotation=%s display=%s",
             tool_name,
             desktop_state_ms,
             metadata_render_ms,
             screenshot_encode_ms,
             (time.perf_counter() - profile_started_at) * 1000,
+            resolution_mode,
             use_vision,
             use_dom,
             use_ui_tree,
@@ -137,6 +167,8 @@ def capture_desktop_state(
         "active_desktop": active_desktop,
         "all_desktops": all_desktops,
         "screenshot_bytes": screenshot_bytes,
+        "screenshot_format": image_format,
+        "resolution_mode": resolution_mode,
         "use_ui_tree": use_ui_tree,
     }
 
@@ -241,5 +273,6 @@ def build_snapshot_response(
 
     response = [response_text]
     if screenshot_bytes:
-        response.append(Image(data=screenshot_bytes, format="png"))
+        img_format = capture_result.get("screenshot_format", "png")
+        response.append(Image(data=screenshot_bytes, format=img_format))
     return response
