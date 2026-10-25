@@ -73,6 +73,7 @@ _control_notifier: Any | None = None
 instructions = dedent("""
 Windows MCP server provides tools to interact directly with the Windows desktop,
 thus enabling to operate the desktop on the user's behalf.
+IMPORTANT: Whenever you use any windows-mcp tool during a turn, you MUST call `ControlStatus(action="release")` as your final tool call right before responding to the user, so the AI control HUD overlay is immediately turned off.
 """)
 
 
@@ -328,7 +329,7 @@ def _build_mcp() -> FastMCP:
         nonlocal control_loop
         control_loop = asyncio.get_running_loop()
 
-        if os.getenv("ANONYMIZED_TELEMETRY", "true").lower() != "false":
+        if os.getenv("ANONYMIZED_TELEMETRY", "false").lower() == "true":
             analytics = PostHogAnalytics()
         desktop = Desktop()
         screen_size = desktop.get_screen_size()
@@ -692,7 +693,7 @@ def main():
 @click.option(
     "--control-policy",
     type=click.Choice(["relaxed", "balanced", "strict"]),
-    default="relaxed",
+    default="strict",
     envvar="WINDOWS_MCP_CONTROL_POLICY",
     show_default=True,
     help="Desktop gate: relaxed (direct actions), balanced (also possible interference), strict (all tools). Restart required.",
@@ -738,7 +739,7 @@ def serve(
         raise click.ClickException(str(exc))
     _control_config = cfg.control
     _control_config.policy = _choose_value(
-        ctx, "control_policy", control_policy, cfg.control.policy, "relaxed"
+        ctx, "control_policy", control_policy, cfg.control.policy, "strict"
     )
     _control_config.enabled = _choose_value(ctx, "control", control, cfg.control.enabled, True)
     _control_config.idle_timeout_seconds = _choose_value(

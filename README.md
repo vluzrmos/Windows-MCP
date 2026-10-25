@@ -26,6 +26,22 @@
 
 mcp-name: io.github.CursorTouch/Windows-MCP
 
+## 🔒 Fork Customizations (`vluzrmos/Windows-MCP`)
+
+This fork includes security, privacy, and UX improvements over the upstream repository:
+
+1. **Telemetry Disabled by Default (`ANONYMIZED_TELEMETRY=false`):**
+   - PostHog telemetry is disabled out-of-the-box in `src/windows_mcp/__main__.py` and the embedded `POSTHOG_API_KEY` has been removed from `src/windows_mcp/infrastructure/analytics.py`.
+2. **Strict Control Policy by Default (`--control-policy strict`):**
+   - All MCP tools (including `Snapshot`, `Screenshot`, `Scrape`, and `Wait`) activate and maintain the AI desktop control HUD overlay, preventing accidental user takeover while the agent is observing or reading content.
+3. **Extended AI Control Lease (2 Minutes) + Immediate HUD Release (`ControlStatus(action="release")`):**
+   - The AI control lease between consecutive tool calls is extended from `15s` to `120s` (`2m`) so the HUD does not prematurely disappear while the LLM is processing long content.
+   - Added `action="release"` to `ControlStatus` (and server instructions) so the agent immediately turns off the HUD overlay and returns control to the user right before sending its final response.
+4. **Screenshot Capture Flash Disabled by Default (`WINDOWS_MCP_DISABLE_FLASH=1`):**
+   - Disables the orange-red capture flash overlay (`flash_overlay.py`) by default so only the primary blue AI control HUD indicates active agent operation.
+5. **Python 3.13+ Compatibility:**
+   - Relaxed `requires-python` in `pyproject.toml` from `>=3.14` to `>=3.13`.
+
 ## Updates
 - Windows-MCP reached `2M+ Users` in [Claude Desktop Extensiosn](https://claude.ai/directory). 
 - Try out [🪟Windows-Use](https://pypi.org/project/windows-use/), an agent built using Windows-MCP.

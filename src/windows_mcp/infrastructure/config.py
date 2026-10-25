@@ -46,7 +46,7 @@ class ControlConfig:
     mouse_takeover_pixels: int = 500  # Accepted for compatibility; pixel fallback is disabled.
     enabled: bool = True
     idle_timeout_seconds: float = 10.0
-    policy: str = "relaxed"
+    policy: str = "strict"
 
 
 @dataclass

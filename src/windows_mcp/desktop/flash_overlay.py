@@ -37,7 +37,7 @@ _all_overlays: set["_Overlay"] = set()
 
 
 def _flash_disabled() -> bool:
-    value = os.getenv("WINDOWS_MCP_DISABLE_FLASH", "")
+    value = os.getenv("WINDOWS_MCP_DISABLE_FLASH", "1")
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 

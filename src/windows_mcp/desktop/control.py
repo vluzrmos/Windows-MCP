@@ -41,7 +41,7 @@ class ControlCoordinator:
         # Set once by the server lifespan before any tools or hooks start.
         self.enabled = True
         self.idle_timeout_seconds = 10.0
-        self.policy = "relaxed"
+        self.policy = "strict"
         self._lock = threading.Lock()
         self._state = "unavailable"
         self._generation = 0
@@ -342,7 +342,33 @@ class ControlCoordinator:
         with self._lock:
             self._active_calls = max(0, self._active_calls - 1)
             if self._state in ("ai", "takeover_pending") and not self._active_calls:
-                self._lease_until = time.monotonic() + 15.0
+                self._lease_until = time.monotonic() + 120.0
+
+    def release(self) -> dict:
+        """Immediately release AI desktop control and hide the HUD overlay."""
+        if not self.enabled:
+            return self._snapshot_locked(time.monotonic())
+        if self._emergency:
+            self._mark_unavailable()
+        now = time.monotonic()
+        with self._lock:
+            changed = False
+            if self._state in ("ai", "takeover_pending"):
+                self._active_calls = 0
+                self._lease_until = 0.0
+                stamp = self._last_physical_event
+                recent = stamp > 0 and now - stamp < self.idle_timeout_seconds
+                if recent:
+                    self._last_user = stamp
+                    changed = self._set_locked("user")
+                else:
+                    changed = self._set_locked("ready")
+            else:
+                changed = self._tick_locked(now)
+            result = self._snapshot_locked(now)
+        if changed:
+            self._notify(result)
+        return result
 
     def start(self) -> None:
         if not self.enabled:

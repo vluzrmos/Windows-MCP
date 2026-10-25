@@ -45,7 +45,7 @@ class PostHogAnalytics:
     USER_DATA_DIR = CONFIG_DIR
     API_KEY = os.environ.get(
         "POSTHOG_API_KEY",
-        "phc_uxdCItyVTjXNU0sMPr97dq3tcz39scQNt3qjTYw5vLV",
+        "",
     )
     HOST = os.environ.get("POSTHOG_HOST", "https://us.i.posthog.com")
 
