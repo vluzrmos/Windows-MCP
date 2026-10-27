@@ -48,6 +48,7 @@ This fork includes security, privacy, and UX improvements over the upstream repo
      - **`winocr`:** Uses native `Windows.Media.Ocr` (`winocr`) in ~80–150ms to extract all visible text and line bounding boxes mapped back to real screen coordinates (`center: [x, y]`, `bbox: [l, t, r, b]`).
      - **`llm`:** Sends the screenshot to any OpenAI-compatible `/v1/chat/completions` vision endpoint configured on the server via `WINDOWS_MCP_LLM_BASE_URL` / `WINDOWS_MCP_LLM_API_KEY` / `WINDOWS_MCP_LLM_MODEL` or `[vision]` in `~/.windows-mcp/config.toml` (the tool call may override only `llm_model` and `vision_prompt`; the endpoint and key are never taken from tool arguments).
      - **`winocr+llm`:** Combines both native Windows OCR and the OpenAI-compatible Vision LLM in a single JSON payload.
+   - **Default:** when a call omits `vision_mode`, the server uses `WINDOWS_MCP_VISION_MODE` or `[vision] mode` from `config.toml`, falling back to `winocr`. Pass `vision_mode="image"` explicitly to get the screenshot image itself.
 7. **Python 3.13+ Compatibility:**
    - Relaxed `requires-python` in `pyproject.toml` from `>=3.14` to `>=3.13`.
 
