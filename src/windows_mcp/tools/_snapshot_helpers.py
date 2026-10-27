@@ -112,8 +112,6 @@ def capture_desktop_state(
     resolution: str | None = "compact",
     vision_mode: str | None = None,
     vision_prompt: str | None = None,
-    llm_url: str | None = None,
-    llm_token: str | None = None,
     llm_model: str | None = None,
 ):
     profile_enabled = _snapshot_profile_enabled()
@@ -203,8 +201,6 @@ def capture_desktop_state(
                 screenshot_bytes or b"",
                 image_format=image_format,
                 prompt=vision_prompt,
-                llm_url=llm_url,
-                llm_token=llm_token,
                 llm_model=llm_model,
                 coord_scale=coord_scale,
                 region_offset=region_offset,
@@ -218,8 +214,6 @@ def capture_desktop_state(
                 screenshot_bytes or b"",
                 image_format=image_format,
                 prompt=vision_prompt,
-                llm_url=llm_url,
-                llm_token=llm_token,
                 llm_model=llm_model,
                 coord_scale=coord_scale,
                 region_offset=region_offset,

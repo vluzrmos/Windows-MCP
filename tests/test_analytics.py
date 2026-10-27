@@ -3,7 +3,7 @@ import shutil
 import os
 from uuid import uuid4
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -114,3 +114,18 @@ class TestPostHogAnalytics:
             assert original_read_text(user_id_file, encoding="utf-8") == analytics.user_id
         finally:
             shutil.rmtree(user_data_dir, ignore_errors=True)
+
+    async def test_track_error_sends_only_exception_type(self):
+        analytics = PostHogAnalytics.__new__(PostHogAnalytics)
+        analytics.client = MagicMock()
+        analytics._user_id = "user"
+        analytics.mcp_interaction_id = "session"
+
+        await analytics.track_error(
+            FileNotFoundError(r"File not found: C:\Users\someone\secret.txt"),
+            {"tool_name": "FileSystem-Tool"},
+        )
+
+        properties = analytics.client.capture.call_args.kwargs["properties"]
+        assert properties["exception"] == "FileNotFoundError"
+        assert "secret" not in repr(properties)

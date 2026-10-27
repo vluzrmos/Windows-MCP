@@ -23,6 +23,9 @@ from starlette.responses import JSONResponse, RedirectResponse
 
 TOKEN_LIFETIME = 3600   # 1 hour
 CODE_LIFETIME = 300     # 5 minutes
+# /oauth/authorize is unauthenticated, so outstanding codes are capped to keep
+# a flood of requests from growing the store without bound.
+MAX_PENDING_CODES = 1000
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +64,12 @@ class OAuthStore:
         self.clients: dict[str, RegisteredClient] = {}
         self.codes: dict[str, AuthorizationCode] = {}
         self.tokens: dict[str, AccessToken] = {}
+
+    def prune_expired(self, now: float | None = None) -> None:
+        """Drop expired authorization codes and access tokens."""
+        now = time.time() if now is None else now
+        self.codes = {k: v for k, v in self.codes.items() if v.expires_at >= now}
+        self.tokens = {k: v for k, v in self.tokens.items() if v.expires_at >= now}
 
 
 # ---------------------------------------------------------------------------
@@ -172,9 +181,12 @@ def build_oauth_routes(
         if client_id != configured_client_id:
             return JSONResponse({"error": "invalid_client"}, status_code=400)
 
-        client = store.clients[client_id]
-        if redirect_uri not in client.redirect_uris:
-            client.redirect_uris.append(redirect_uri)
+        store.prune_expired()
+        if len(store.codes) >= MAX_PENDING_CODES:
+            return JSONResponse(
+                {"error": "temporarily_unavailable", "error_description": "too many pending authorization requests"},
+                status_code=503,
+            )
 
         code = secrets.token_urlsafe(32)
         store.codes[code] = AuthorizationCode(
@@ -194,17 +206,15 @@ def build_oauth_routes(
 
     async def token(request: Request):
         content_type = request.headers.get("content-type", "")
-        if "application/x-www-form-urlencoded" in content_type:
-            form = await request.form()
-            body = dict(form)
-        elif "application/json" in content_type:
-            body = await request.json()
-        else:
-            try:
-                form = await request.form()
-                body = dict(form)
-            except Exception:
-                return JSONResponse({"error": "invalid_request"}, status_code=400)
+        try:
+            if "application/json" in content_type:
+                body = await request.json()
+            else:
+                body = dict(await request.form())
+        except Exception:
+            return JSONResponse({"error": "invalid_request"}, status_code=400)
+        if not isinstance(body, dict) or not all(isinstance(v, str) for v in body.values()):
+            return JSONResponse({"error": "invalid_request"}, status_code=400)
 
         if body.get("grant_type", "") != "authorization_code":
             return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
@@ -214,6 +224,7 @@ def build_oauth_routes(
         client_id = body.get("client_id", "")
         redirect_uri = body.get("redirect_uri", "")
 
+        store.prune_expired()
         auth_code = store.codes.get(code_value)
         if not auth_code:
             return JSONResponse(

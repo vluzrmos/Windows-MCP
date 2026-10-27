@@ -43,8 +43,6 @@ def register(mcp, *, get_desktop, get_analytics):
         resolution: Literal["compact", "normal"] = "compact",
         vision_mode: Literal["image", "winocr", "llm", "winocr+llm"] | None = None,
         vision_prompt: str | None = None,
-        llm_url: str | None = None,
-        llm_token: str | None = None,
         llm_model: str | None = None,
         width_reference_line: int | None = None,
         height_reference_line: int | None = None,
@@ -67,8 +65,6 @@ def register(mcp, *, get_desktop, get_analytics):
                 resolution=resolution,
                 vision_mode=vision_mode,
                 vision_prompt=vision_prompt,
-                llm_url=llm_url,
-                llm_token=llm_token,
                 llm_model=llm_model,
             )
         except Exception as e:
@@ -103,8 +99,6 @@ def register(mcp, *, get_desktop, get_analytics):
         resolution: Literal["compact", "normal"] = "compact",
         vision_mode: Literal["image", "winocr", "llm", "winocr+llm"] | None = None,
         vision_prompt: str | None = None,
-        llm_url: str | None = None,
-        llm_token: str | None = None,
         llm_model: str | None = None,
         width_reference_line: int | None = None,
         height_reference_line: int | None = None,
@@ -127,8 +121,6 @@ def register(mcp, *, get_desktop, get_analytics):
                 resolution=resolution,
                 vision_mode=vision_mode,
                 vision_prompt=vision_prompt,
-                llm_url=llm_url,
-                llm_token=llm_token,
                 llm_model=llm_model,
             )
         except Exception as e:

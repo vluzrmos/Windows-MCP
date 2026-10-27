@@ -1,4 +1,5 @@
 import logging
+import re
 import signal
 import subprocess
 from xml.sax.saxutils import escape as xml_escape
@@ -13,10 +14,17 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
+_PS_SINGLE_QUOTES = re.compile("(['‘’‚‛])")
+
 
 def ps_quote(value: str) -> str:
-    """Wrap value in PowerShell single-quoted string literal (escapes ' as '')."""
-    return "'" + value.replace("'", "''") + "'"
+    """Wrap value in PowerShell single-quoted string literal.
+
+    PowerShell treats the typographic quotes U+2018-U+201B as single-quote
+    delimiters too, so each of them is doubled along with ' — escaping only
+    the ASCII quote lets a value such as ``x’; calc; ’`` break out.
+    """
+    return "'" + _PS_SINGLE_QUOTES.sub(r"\1\1", value) + "'"
 
 
 def ps_quote_for_xml(value: str) -> str:

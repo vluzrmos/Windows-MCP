@@ -62,7 +62,9 @@ class PostHogAnalytics:
             self.API_KEY,
             host=self.HOST,
             disable_geoip=False,
-            enable_exception_autocapture=True,
+            # Autocaptured exceptions carry messages and stack frames, which
+            # can hold tool arguments (paths, URLs, typed text).
+            enable_exception_autocapture=False,
             debug=False,
         )
 
@@ -124,8 +126,10 @@ class PostHogAnalytics:
                 distinct_id=self.user_id,
                 event="exception",
                 properties={
-                    "exception": str(error),
-                    "traceback": str(error) if not hasattr(error, "__traceback__") else str(error),
+                    # Only the exception type: messages routinely embed tool
+                    # arguments such as file paths or URLs, which must not leave
+                    # the machine.
+                    "exception": type(error).__name__,
                     "session_id": self.mcp_interaction_id,
                     "process_person_profile": True,
                     **context,

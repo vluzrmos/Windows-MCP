@@ -173,18 +173,21 @@ def run_openai_vision_llm(
     *,
     image_format: str = "jpeg",
     prompt: str | None = None,
-    llm_url: str | None = None,
-    llm_token: str | None = None,
     llm_model: str | None = None,
     coord_scale: float = 1.0,
     region_offset: tuple[int, int] = (0, 0),
 ) -> dict[str, Any]:
-    """Send the screenshot to an OpenAI-compatible Vision LLM endpoint and return structured output."""
+    """Send the screenshot to an OpenAI-compatible Vision LLM endpoint and return structured output.
+
+    The endpoint and API key come only from server configuration (environment
+    or config.toml), never from tool arguments: a model steered by prompt
+    injection could otherwise ship the screen and the configured key to any URL.
+    """
     started_at = time.perf_counter()
     settings = _get_vision_settings()
 
-    base_url = llm_url or settings["llm_base_url"] or "http://localhost:11434/v1"
-    api_key = llm_token if llm_token is not None else settings["llm_api_key"]
+    base_url = settings["llm_base_url"] or "http://localhost:11434/v1"
+    api_key = settings["llm_api_key"]
     model = llm_model or settings["llm_model"]
 
     endpoint = _resolve_chat_completions_endpoint(base_url)

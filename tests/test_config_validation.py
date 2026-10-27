@@ -83,6 +83,21 @@ def test_valid_server_config_loads_and_round_trips(tmp_path: Path) -> None:
     assert out.read_text(encoding="utf-8") == text
 
 
+def test_write_config_escapes_quotes_and_backslashes(tmp_path: Path) -> None:
+    cfg = load_config(None)
+    cfg.server.auth_key = 'tok"\ninjected = true'
+    cfg.server.ssl_certfile = r"C:\certs\server.pem"
+    cfg.vision.llm_api_key = 'k\\"ey'
+
+    out = tmp_path / "out.toml"
+    write_config(cfg, out)
+    loaded = load_config(out)
+
+    assert loaded.server.auth_key == 'tok"\ninjected = true'
+    assert loaded.server.ssl_certfile == r"C:\certs\server.pem"
+    assert loaded.vision.llm_api_key == 'k\\"ey'
+
+
 def test_empty_server_section_loads_defaults(tmp_path: Path) -> None:
     path = tmp_path / "config.toml"
     path.write_text("[server]\n", encoding="utf-8")

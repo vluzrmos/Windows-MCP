@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import tomllib
 from dataclasses import dataclass, field
@@ -223,6 +224,17 @@ def load_config(path: Path | None) -> WindowsMCPConfig:
     return cfg
 
 
+def _toml_str(value: object) -> str:
+    """Render *value* as a TOML basic string.
+
+    JSON string escapes are a subset of TOML's, so json.dumps quotes and
+    escapes backslashes, double quotes and control characters correctly —
+    a Windows path or a secret containing ``"`` can no longer break the file
+    or inject extra keys.
+    """
+    return json.dumps(str(value), ensure_ascii=False)
+
+
 def write_config(cfg: WindowsMCPConfig, path: Path) -> None:
     """Serialize *cfg* to TOML at *path*, writing only non-default values."""
     lines: list[str] = []
@@ -230,19 +242,19 @@ def write_config(cfg: WindowsMCPConfig, path: Path) -> None:
     sd, dd = cfg.server, ServerConfig()
     server_lines: list[str] = []
     if sd.transport != dd.transport:
-        server_lines.append(f'transport = "{sd.transport}"')
+        server_lines.append(f"transport = {_toml_str(sd.transport)}")
     if sd.host != dd.host:
-        server_lines.append(f'host = "{sd.host}"')
+        server_lines.append(f"host = {_toml_str(sd.host)}")
     if sd.port != dd.port:
         server_lines.append(f"port = {sd.port}")
     if sd.allow_insecure_remote:
         server_lines.append("allow_insecure_remote = true")
     if sd.auth_key:
-        server_lines.append(f'auth_key = "{sd.auth_key}"')
+        server_lines.append(f"auth_key = {_toml_str(sd.auth_key)}")
     if sd.ssl_certfile:
-        server_lines.append(f'ssl_certfile = "{sd.ssl_certfile}"')
+        server_lines.append(f"ssl_certfile = {_toml_str(sd.ssl_certfile)}")
     if sd.ssl_keyfile:
-        server_lines.append(f'ssl_keyfile = "{sd.ssl_keyfile}"')
+        server_lines.append(f"ssl_keyfile = {_toml_str(sd.ssl_keyfile)}")
     if sd.stateless_http:
         server_lines.append("stateless_http = true")
     if server_lines:
@@ -251,20 +263,20 @@ def write_config(cfg: WindowsMCPConfig, path: Path) -> None:
     sec = cfg.security
     sec_lines: list[str] = []
     if sec.ip_allowlist:
-        items = ", ".join(f'"{ip}"' for ip in sec.ip_allowlist)
+        items = ", ".join(_toml_str(ip) for ip in sec.ip_allowlist)
         sec_lines.append(f"ip_allowlist = [{items}]")
     if sec.cors_origins:
-        items = ", ".join(f'"{o}"' for o in sec.cors_origins)
+        items = ", ".join(_toml_str(o) for o in sec.cors_origins)
         sec_lines.append(f"cors_origins = [{items}]")
     if sec.oauth_client_id:
-        sec_lines.append(f'oauth_client_id = "{sec.oauth_client_id}"')
+        sec_lines.append(f"oauth_client_id = {_toml_str(sec.oauth_client_id)}")
     if sec.oauth_client_secret:
-        sec_lines.append(f'oauth_client_secret = "{sec.oauth_client_secret}"')
+        sec_lines.append(f"oauth_client_secret = {_toml_str(sec.oauth_client_secret)}")
     if sec_lines:
         lines += ["[security]"] + sec_lines + [""]
 
     if cfg.tools.exclude:
-        items = ", ".join(f'"{t}"' for t in cfg.tools.exclude)
+        items = ", ".join(_toml_str(t) for t in cfg.tools.exclude)
         lines += ["[tools]", f"exclude = [{items}]", ""]
 
     ctrl, default_ctrl = cfg.control, ControlConfig()
@@ -274,7 +286,7 @@ def write_config(cfg: WindowsMCPConfig, path: Path) -> None:
         if getattr(ctrl, key) != getattr(default_ctrl, key)
     ]
     if ctrl.policy != default_ctrl.policy:
-        control_lines.append(f'policy = "{ctrl.policy}"')
+        control_lines.append(f"policy = {_toml_str(ctrl.policy)}")
     if ctrl.enabled != default_ctrl.enabled:
         control_lines.append(f"enabled = {str(ctrl.enabled).lower()}")
     if ctrl.idle_timeout_seconds != default_ctrl.idle_timeout_seconds:
@@ -285,15 +297,15 @@ def write_config(cfg: WindowsMCPConfig, path: Path) -> None:
     vis, default_vis = cfg.vision, VisionConfig()
     vision_lines: list[str] = []
     if vis.mode != default_vis.mode:
-        vision_lines.append(f'mode = "{vis.mode}"')
+        vision_lines.append(f"mode = {_toml_str(vis.mode)}")
     if vis.llm_base_url:
-        vision_lines.append(f'llm_base_url = "{vis.llm_base_url}"')
+        vision_lines.append(f"llm_base_url = {_toml_str(vis.llm_base_url)}")
     if vis.llm_api_key:
-        vision_lines.append(f'llm_api_key = "{vis.llm_api_key}"')
+        vision_lines.append(f"llm_api_key = {_toml_str(vis.llm_api_key)}")
     if vis.llm_model:
-        vision_lines.append(f'llm_model = "{vis.llm_model}"')
+        vision_lines.append(f"llm_model = {_toml_str(vis.llm_model)}")
     if vis.ocr_lang != default_vis.ocr_lang:
-        vision_lines.append(f'ocr_lang = "{vis.ocr_lang}"')
+        vision_lines.append(f"ocr_lang = {_toml_str(vis.ocr_lang)}")
     if vision_lines:
         lines += ["[vision]", *vision_lines, ""]
 

@@ -1,5 +1,7 @@
 from unittest.mock import patch
 
+import pytest
+
 from windows_mcp import registry
 from windows_mcp.powershell.utils import ps_quote
 
@@ -22,6 +24,12 @@ class TestPsQuote:
 
     def test_empty_string(self):
         assert ps_quote("") == "''"
+
+    @pytest.mark.parametrize("quote", ["‘", "’", "‚", "‛"])
+    def test_typographic_quotes_escaped(self, quote):
+        # PowerShell closes a single-quoted string on these too.
+        value = f"x{quote}; calc; {quote}"
+        assert ps_quote(value) == f"'x{quote * 2}; calc; {quote * 2}'"
 
     def test_registry_path(self):
         result = ps_quote("HKCU:\\Software\\Test")
