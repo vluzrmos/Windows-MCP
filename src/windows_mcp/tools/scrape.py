@@ -8,7 +8,7 @@ from fastmcp import Context
 def register(mcp, *, get_desktop, get_analytics):
     @mcp.tool(
         name="Scrape",
-        description="Fetch/scrape web page content from a URL. Keywords: scrape, fetch, browse, web, URL, extract, download, read webpage. By default (use_dom=False), performs a lightweight HTTP request to the URL and returns a clean LLM-processed summary of the page to avoid context bloat. Provide query to focus extraction on specific information. Set use_dom=True to extract from the active browser tab's DOM instead (required when site blocks HTTP requests; supported in Chrome, Edge, and Firefox). Set use_sampling=False to get raw content without LLM processing.",
+        description="Fetch/scrape web page content from a URL. Keywords: scrape, fetch, browse, web, URL, extract, download, read webpage. By default (use_dom=False), performs a lightweight HTTP request to the URL and returns a clean LLM-processed summary of the page to avoid context bloat. Provide query to focus extraction on specific information. Set use_dom=True to extract from the active browser tab's DOM instead (required when site blocks HTTP requests; supported in Chrome, Edge, and Firefox); this returns only the visible viewport unless full_page=True, which returns all text of the page (including content scrolled out of view and iframes) in one call. Set use_sampling=False to get raw content without LLM processing.",
         annotations=ToolAnnotations(
             title="Scrape",
             readOnlyHint=True,
@@ -22,17 +22,25 @@ def register(mcp, *, get_desktop, get_analytics):
         url: str,
         query: str | None = None,
         use_dom: bool | str = False,
+        full_page: bool | str = False,
         use_sampling: bool | str = True,
         ctx: Context = None,
     ) -> str:
         desktop = get_desktop()
         use_dom = use_dom is True or (isinstance(use_dom, str) and use_dom.lower() == "true")
+        full_page = full_page is True or (
+            isinstance(full_page, str) and full_page.lower() == "true"
+        )
         use_sampling = use_sampling is True or (
             isinstance(use_sampling, str) and use_sampling.lower() == "true"
         )
 
         if not use_dom:
             content = desktop.scrape(url)
+        elif full_page:
+            content = await run_uia_affine(desktop.get_page_text)
+            if not content:
+                return f"No DOM information found. Please open {url} in browser first."
         else:
             # Scrape is async, so with_analytics cannot move the whole body to the
             # synchronous UIA lane.  Hop only the DOM/UIAutomation capture itself.
@@ -47,7 +55,9 @@ def register(mcp, *, get_desktop, get_analytics):
             dom_node = tree_state.dom_node
             vertical_scroll_percent = dom_node.metadata.get("vertical_scroll_percent", 0)
             content = "\n".join([node.text for node in tree_state.dom_informative_nodes])
-            header_status = "Reached top" if vertical_scroll_percent <= 0 else "Scroll up to see more"
+            header_status = (
+                "Reached top" if vertical_scroll_percent <= 0 else "Scroll up to see more"
+            )
             footer_status = (
                 "Reached bottom" if vertical_scroll_percent >= 100 else "Scroll down to see more"
             )

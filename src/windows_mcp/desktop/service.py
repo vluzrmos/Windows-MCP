@@ -13,6 +13,7 @@ from windows_mcp.desktop.views import DesktopState, Window, Browser, Status, Siz
 from windows_mcp.tree.views import BoundingBox, TreeElementNode, TreeState, SemanticNode
 from PIL import ImageFont, ImageDraw, Image
 from windows_mcp.tree.service import Tree
+from windows_mcp.tree.dom_text import extract_page_text
 from windows_mcp.desktop import screenshot as screenshot_capture
 from windows_mcp.desktop.control import get_controller
 from windows_mcp.desktop import flash_overlay
@@ -469,6 +470,14 @@ class Desktop:
             return Browser.has_process(process.name())
         except Exception:
             return False
+
+    def get_page_text(self) -> str | None:
+        """Return the full DOM text of the foreground browser window, or None if it is not a browser."""
+        handle = uia.GetForegroundWindow()
+        node = uia.ControlFromHandle(handle) if handle else None
+        if node is None or not self.is_window_browser(node):
+            return None
+        return extract_page_text(handle)
 
     def _find_window_by_name(
         self, name: str, refresh_state: bool = False

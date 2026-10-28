@@ -64,3 +64,35 @@ def test_dom_scrape_reports_scroll_position(
     )
 
     assert result == f"URL: https://example.com\nContent:\n{header}\nPage text\n{footer}"
+
+
+class FakeFullPageDesktop:
+    def __init__(self, page_text: str | None) -> None:
+        self.page_text = page_text
+
+    def get_page_text(self) -> str | None:
+        return self.page_text
+
+    def get_state(self, **kwargs: object) -> SimpleNamespace:
+        raise AssertionError("full_page must not take a viewport snapshot")
+
+
+@pytest.mark.parametrize(
+    ("page_text", "expected"),
+    [
+        ("Line one\nLine two", "URL: https://example.com\nContent:\nLine one\nLine two"),
+        (None, "No DOM information found. Please open https://example.com in browser first."),
+    ],
+)
+def test_dom_scrape_full_page_returns_whole_page_text(page_text: str | None, expected: str) -> None:
+    mcp = FakeMCP()
+    desktop = FakeFullPageDesktop(page_text)
+    scrape_tool_module.register(mcp, get_desktop=lambda: desktop, get_analytics=lambda: None)
+
+    result = asyncio.run(
+        mcp.tools["Scrape"](
+            url="https://example.com", use_dom=True, full_page="true", use_sampling=False
+        )
+    )
+
+    assert result == expected
