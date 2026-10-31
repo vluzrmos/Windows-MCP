@@ -1,4 +1,6 @@
+import codecs
 import os
+import stat
 
 import pytest
 
@@ -36,6 +38,27 @@ class TestReadFile:
     def test_read_directory_path(self, tmp_path):
         result = read_file(str(tmp_path))
         assert "Error: Path is not a file" in result
+
+    @pytest.mark.parametrize(
+        "bom, codec",
+        [
+            (codecs.BOM_UTF8, "utf-8"),
+            (codecs.BOM_UTF16_LE, "utf-16-le"),
+            (codecs.BOM_UTF16_BE, "utf-16-be"),
+        ],
+        ids=["utf-8-sig", "utf-16-le", "utf-16-be"],
+    )
+    def test_read_decodes_bom(self, tmp_path, bom, codec):
+        # Windows PowerShell 5.1's `>` writes UTF-16 LE; Notepad writes UTF-8 with a BOM.
+        f = tmp_path / "bom.txt"
+        f.write_bytes(bom + "héllo\r\nwörld\r\n".encode(codec))
+        assert read_file(str(f)).endswith("\nhéllo\nwörld\n")
+        assert read_file(str(f), offset=2, limit=1).endswith("of 2:\nwörld\n")
+
+    def test_read_keeps_explicit_encoding_over_bom(self, tmp_path):
+        f = tmp_path / "bom.txt"
+        f.write_bytes(codecs.BOM_UTF8 + b"hi")
+        assert read_file(str(f), encoding="latin-1").endswith("\nï»¿hi")
 
 
 class TestWriteFile:
@@ -96,6 +119,19 @@ class TestCopyPath:
         result = copy_path(str(src), str(dst), overwrite=True)
         assert "Copied file" in result
         assert dst.read_text(encoding="utf-8") == "new"
+
+    def test_copy_directory_overwrites_read_only_files(self, tmp_path):
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "new.txt").write_text("new", encoding="utf-8")
+        dst = tmp_path / "dst"
+        dst.mkdir()
+        old = dst / "old.txt"
+        old.write_text("old", encoding="utf-8")
+        os.chmod(old, stat.S_IREAD)
+        result = copy_path(str(src), str(dst), overwrite=True)
+        assert "Copied directory" in result
+        assert [p.name for p in dst.iterdir()] == ["new.txt"]
 
 
 class TestMovePath:
@@ -196,6 +232,17 @@ class TestDeletePath:
         d = tmp_path / "fulldir"
         d.mkdir()
         (d / "file.txt").write_text("x", encoding="utf-8")
+        result = delete_path(str(d), recursive=True)
+        assert "Deleted directory" in result
+        assert not d.exists()
+
+    def test_delete_recursive_removes_read_only_files(self, tmp_path):
+        # Git marks .git/objects files read-only, which blocks a plain rmtree on Windows.
+        d = tmp_path / "repo"
+        pack = d / ".git" / "objects" / "pack" / "pack-1.pack"
+        pack.parent.mkdir(parents=True)
+        pack.write_bytes(b"x")
+        os.chmod(pack, stat.S_IREAD)
         result = delete_path(str(d), recursive=True)
         assert "Deleted directory" in result
         assert not d.exists()
@@ -319,3 +366,41 @@ class TestGetFileInfo:
     def test_not_found(self, tmp_path):
         result = get_file_info(str(tmp_path / "nope"))
         assert "Error: Path not found" in result
+
+    @pytest.mark.parametrize("dangling", [False, True])
+    def test_symlink_info_reports_link(self, tmp_path, dangling):
+        target = tmp_path / "target.txt"
+        target.write_text("hello", encoding="utf-8")
+        link = tmp_path / "link.txt"
+        try:
+            link.symlink_to(target)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("Creating symbolic links requires Windows privileges")
+            raise
+        if dangling:
+            target.unlink()
+
+        result = get_file_info(str(link))
+
+        assert f"Path: {link}" in result
+        assert "Type: Symlink" in result
+        assert f"Link target: {target}" in result
+
+    @pytest.mark.skipif(os.name != "nt", reason="Windows junctions")
+    @pytest.mark.parametrize("dangling", [False, True])
+    def test_junction_info_reports_link(self, tmp_path, dangling):
+        import _winapi
+
+        target = tmp_path / "target"
+        target.mkdir()
+        link = tmp_path / "link"
+        _winapi.CreateJunction(str(target), str(link))
+        if dangling:
+            target.rmdir()
+
+        result = get_file_info(str(link))
+
+        assert f"Path: {link}" in result
+        assert "Type: Junction" in result
+        assert f"Link target: {target}" in result

@@ -5,9 +5,11 @@ Provides structured, safe file operations as an alternative to raw Shell command
 
 from datetime import datetime
 from pathlib import Path
+import codecs
 import fnmatch
 import logging
 import shutil
+import stat
 import os
 from windows_mcp.desktop.utils import is_elevated
 
@@ -20,6 +22,41 @@ from windows_mcp.filesystem.views import (
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+# Windows tools write byte order marks: Windows PowerShell's `>` and `reg export`
+# write UTF-16 LE, and Notepad and `Out-File -Encoding utf8` write UTF-8 with a BOM.
+_BOM_ENCODINGS = (
+    (codecs.BOM_UTF8, 'utf-8-sig'),
+    (codecs.BOM_UTF16_LE, 'utf-16'),
+    (codecs.BOM_UTF16_BE, 'utf-16'),
+)
+
+
+def _bom_encoding(file_path: Path, encoding: str) -> str:
+    """Return the encoding named by the file's BOM when reading as UTF-8, else *encoding*."""
+    if codecs.lookup(encoding).name != 'utf-8':
+        return encoding
+    with open(file_path, 'rb') as f:
+        head = f.read(3)
+    for bom, bom_encoding in _BOM_ENCODINGS:
+        if head.startswith(bom):
+            return bom_encoding
+    return encoding
+
+
+def _rmtree(path: Path) -> None:
+    """Remove a directory tree, including read-only entries, as `rd /s` does.
+
+    Git marks the files under .git/objects read-only, so a plain rmtree cannot
+    delete a cloned repository on Windows.
+    """
+    def clear_readonly(func, entry, exc):
+        if not isinstance(exc, PermissionError):
+            raise exc
+        os.chmod(entry, stat.S_IWRITE)
+        func(entry)
+
+    shutil.rmtree(str(path), onexc=clear_readonly)
 
 
 def read_file(path: str, offset: int | None = None, limit: int | None = None, encoding: str = 'utf-8') -> str:
@@ -34,6 +71,7 @@ def read_file(path: str, offset: int | None = None, limit: int | None = None, en
         return f'Error: File too large ({file_path.stat().st_size:,} bytes). Maximum is {MAX_READ_SIZE:,} bytes. Use offset/limit parameters or the Shell tool for large files.'
 
     try:
+        encoding = _bom_encoding(file_path, encoding)
         with open(file_path, 'r', encoding=encoding, errors='replace') as f:
             if offset is not None or limit is not None:
                 lines = f.readlines()
@@ -103,7 +141,7 @@ def copy_path(source: str, destination: str, overwrite: bool = False) -> str:
             return f'Copied file: {src} -> {dst}'
         elif src.is_dir():
             if dst.exists() and overwrite:
-                shutil.rmtree(str(dst))
+                _rmtree(dst)
             shutil.copytree(str(src), str(dst))
             return f'Copied directory: {src} -> {dst}'
         else:
@@ -125,6 +163,20 @@ def move_path(source: str, destination: str, overwrite: bool = False) -> str:
     if not src.exists():
         return f'Error: Source not found: {src}'
 
+    # On a case-insensitive file system, renaming 'a.txt' to 'A.txt' resolves to the source.
+    raw_dst = Path(destination).absolute()
+    if (
+        src == dst
+        and raw_dst.name != src.name
+        and raw_dst.name.casefold() == src.name.casefold()
+        and raw_dst.parent.resolve() == src.parent
+    ):
+        try:
+            src.rename(src.with_name(raw_dst.name))
+            return f'Moved: {src} -> {src.with_name(raw_dst.name)}'
+        except Exception as e:
+            return f'Error moving: {e}'
+
     if src == dst or dst in src.parents or (src.is_dir() and src in dst.parents):
         return 'Error: Source and destination paths overlap.'
 
@@ -135,7 +187,7 @@ def move_path(source: str, destination: str, overwrite: bool = False) -> str:
         dst.parent.mkdir(parents=True, exist_ok=True)
         if dst.exists() and overwrite:
             if dst.is_dir():
-                shutil.rmtree(str(dst))
+                _rmtree(dst)
             else:
                 dst.unlink()
         shutil.move(str(src), str(dst))
@@ -172,7 +224,7 @@ def delete_path(path: str, recursive: bool = False) -> str:
                     return f'Error: Directory is not empty: {target}. Set recursive=True to delete non-empty directories.'
                 target.rmdir()
             else:
-                shutil.rmtree(str(target))
+                _rmtree(target)
             return f'Deleted directory: {target}'
         else:
             return f'Error: Unsupported file type: {target}'
@@ -288,16 +340,33 @@ def search_files(path: str, pattern: str, recursive: bool = True) -> str:
         return f'Error searching: {e}'
 
 
+def _strip_nt_prefix(path: str) -> str:
+    """Drop the ``\\\\?\\`` prefix that ``os.readlink`` keeps on absolute targets."""
+    if path.startswith('\\\\?\\UNC\\'):
+        return '\\\\' + path[8:]
+    if path.startswith('\\\\?\\'):
+        return path[4:]
+    return path
+
+
 def get_file_info(path: str) -> str:
     """Get detailed metadata about a file or directory."""
-    target = Path(path).resolve()
+    target = Path(path).absolute()
+    is_link = target.is_symlink() or target.is_junction()
+    if not is_link:
+        target = target.resolve()
 
-    if not target.exists():
+    if not is_link and not target.exists():
         return f'Error: Path not found: {target}'
 
     try:
-        stat = target.stat()
-        file_type = 'Directory' if target.is_dir() else 'File' if target.is_file() else 'Symlink' if target.is_symlink() else 'Other'
+        stat = target.lstat() if is_link else target.stat()
+        if target.is_symlink():
+            file_type = 'Symlink'
+        elif target.is_junction():
+            file_type = 'Junction'
+        else:
+            file_type = 'Directory' if target.is_dir() else 'File' if target.is_file() else 'Other'
 
         file = File(
             path=str(target),
@@ -320,8 +389,8 @@ def get_file_info(path: str) -> str:
         if target.is_file():
             file.extension = target.suffix or '(none)'
 
-        if target.is_symlink():
-            file.link_target = str(os.readlink(target))
+        if is_link:
+            file.link_target = _strip_nt_prefix(os.readlink(target))
 
         return file.to_string()
     except PermissionError:
