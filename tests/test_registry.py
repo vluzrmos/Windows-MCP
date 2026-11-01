@@ -16,6 +16,11 @@ class TestPsQuote:
     def test_single_quote_escaping(self):
         assert ps_quote("it's") == "'it''s'"
 
+    @pytest.mark.parametrize("quote", ["\u2018", "\u2019", "\u201a", "\u201b"])
+    def test_typographic_single_quote_escaping(self, quote):
+        # PowerShell treats these like the ASCII apostrophe inside a single-quoted string.
+        assert ps_quote(f"it{quote}s") == f"'it{quote}{quote}s'"
+
     def test_double_quotes_not_escaped(self):
         assert ps_quote('say "hi"') == """'say "hi"'"""
 
@@ -137,6 +142,25 @@ class TestRegistryList:
         with patch(EXECUTE_COMMAND_PATH, return_value=("No values or sub-keys found.", 0)):
             result = registry.list_key(path="HKCU:\\Software\\Empty")
         assert 'No values or sub-keys found' in result
+
+    def _command(self):
+        with patch(EXECUTE_COMMAND_PATH, return_value=("", 0)) as mock_exec:
+            registry.list_key(path="HKCU:\\Software\\Test")
+        return mock_exec.call_args[0][0]
+
+    def test_excludes_only_provider_properties(self):
+        # Get-ItemProperty adds these five; a PS* pattern also hides registry
+        # values whose names start with PS, such as PSModulePath.
+        cmd = self._command()
+        assert "PS*" not in cmd
+        assert "-ExcludeProperty PSPath, PSParentPath, PSChildName, PSDrive, PSProvider |" in cmd
+
+    def test_raises_item_limit_and_line_width(self):
+        # Format-List shows 4 items of an array value by default, and Windows
+        # PowerShell 5.1 wraps long values at the console width (120 columns).
+        cmd = self._command()
+        assert "$FormatEnumerationLimit = 256;" in cmd.split("Format-List")[0]
+        assert "Out-String -Width ([int]::MaxValue)" in cmd
 
 
 class TestRegistryLiteralPath:

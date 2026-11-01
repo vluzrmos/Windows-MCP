@@ -1,5 +1,4 @@
 import logging
-import re
 import signal
 import subprocess
 from xml.sax.saxutils import escape as xml_escape
@@ -14,17 +13,17 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-_PS_SINGLE_QUOTES = re.compile("(['‘’‚‛])")
+
+# PowerShell ends a single-quoted string at the typographic single quotes U+2018 to
+# U+201B as well as at the ASCII apostrophe, and reads any of them doubled as one
+# literal quote, so all five are doubled.
+_DOUBLE_SINGLE_QUOTES = str.maketrans({q: q * 2 for q in "'\u2018\u2019\u201a\u201b"})
 
 
 def ps_quote(value: str) -> str:
-    """Wrap value in PowerShell single-quoted string literal.
-
-    PowerShell treats the typographic quotes U+2018-U+201B as single-quote
-    delimiters too, so each of them is doubled along with ' — escaping only
-    the ASCII quote lets a value such as ``x’; calc; ’`` break out.
-    """
-    return "'" + _PS_SINGLE_QUOTES.sub(r"\1\1", value) + "'"
+    """Wrap value in PowerShell single-quoted string literal (escapes ' as '', and
+    the typographic single quotes the same way)."""
+    return "'" + value.translate(_DOUBLE_SINGLE_QUOTES) + "'"
 
 
 def ps_quote_for_xml(value: str) -> str:
