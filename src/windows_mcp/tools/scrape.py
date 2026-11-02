@@ -1,5 +1,7 @@
 """Scrape tool — fetch/scrape web page content."""
 
+import asyncio
+
 from mcp.types import ToolAnnotations
 from windows_mcp.infrastructure import run_uia_affine, with_analytics
 from fastmcp import Context
@@ -36,7 +38,9 @@ def register(mcp, *, get_desktop, get_analytics):
         )
 
         if not use_dom:
-            content = desktop.scrape(url)
+            # The fetch can take seconds and needs no UIA: run it on a generic worker
+            # so it neither stalls the MCP event loop nor holds up the UIA lane.
+            content = await asyncio.to_thread(desktop.scrape, url)
         elif full_page:
             content = await run_uia_affine(desktop.get_page_text)
             if not content:

@@ -135,6 +135,22 @@ def write_file(path: str, content: str, append: bool = False, encoding: str = 'u
         return f'Error writing file: {e}'
 
 
+def _kind_mismatch(src: Path, dst: Path, verb: str) -> str | None:
+    """Return an error if *dst* exists and only one of *src* and *dst* is a directory.
+
+    An overwrite removes the destination first, so letting a file replace a directory
+    would delete everything in it.
+    """
+    if not dst.exists() or src.is_dir() == dst.is_dir():
+        return None
+    if dst.is_dir():
+        return (
+            f'Error: Destination is a directory: {dst}. A file cannot replace a directory; '
+            f'to {verb} the file into it, use {dst / src.name} as the destination.'
+        )
+    return f'Error: Destination is a file: {dst}. A directory cannot replace a file.'
+
+
 def copy_path(source: str, destination: str, overwrite: bool = False) -> str:
     """Copy a file or directory to a new location."""
     src = Path(source).resolve()
@@ -145,6 +161,9 @@ def copy_path(source: str, destination: str, overwrite: bool = False) -> str:
 
     if src == dst or dst in src.parents or (src.is_dir() and src in dst.parents):
         return 'Error: Source and destination paths overlap.'
+
+    if error := _kind_mismatch(src, dst, 'copy'):
+        return error
 
     if dst.exists() and not overwrite:
         return f'Error: Destination already exists: {dst}. Set overwrite=True to replace.'
@@ -194,6 +213,9 @@ def move_path(source: str, destination: str, overwrite: bool = False) -> str:
 
     if src == dst or dst in src.parents or (src.is_dir() and src in dst.parents):
         return 'Error: Source and destination paths overlap.'
+
+    if error := _kind_mismatch(src, dst, 'move'):
+        return error
 
     if dst.exists() and not overwrite:
         return f'Error: Destination already exists: {dst}. Set overwrite=True to replace.'
@@ -252,6 +274,36 @@ def delete_path(path: str, recursive: bool = False) -> str:
         return f'Error deleting: {e}'
 
 
+def _is_hidden(path: Path) -> bool:
+    """Return whether *path* has a dot name or the Windows hidden attribute.
+
+    Windows hides desktop.ini, AppData and NTUSER.DAT with the attribute, not a dot name.
+    lstat() reads a junction's own attribute, so the hidden legacy junctions in a profile
+    folder, such as My Documents, count as hidden although their targets are not.
+    """
+    if path.name.startswith('.'):
+        return True
+    try:
+        return bool(path.lstat().st_file_attributes & stat.FILE_ATTRIBUTE_HIDDEN)
+    except OSError:
+        return False
+
+
+def _is_hidden_below(root: Path, entry: Path, cache: dict[Path, bool]) -> bool:
+    """Return whether *entry* or a directory between *root* and *entry* is hidden.
+
+    *root* itself is not checked, so a hidden directory can still be listed explicitly.
+    """
+    path = root
+    for part in entry.relative_to(root).parts:
+        path = path / part
+        if path not in cache:
+            cache[path] = _is_hidden(path)
+        if cache[path]:
+            return True
+    return False
+
+
 def list_directory(path: str, pattern: str | None = None, recursive: bool = False, show_hidden: bool = False) -> str:
     """List contents of a directory."""
     dir_path = Path(path).resolve()
@@ -264,6 +316,7 @@ def list_directory(path: str, pattern: str | None = None, recursive: bool = Fals
     try:
         entries: list[str] = []
         count = 0
+        hidden: dict[Path, bool] = {}
 
         if recursive:
             iterator = dir_path.rglob(pattern or '*')
@@ -271,11 +324,9 @@ def list_directory(path: str, pattern: str | None = None, recursive: bool = Fals
             iterator = dir_path.iterdir()
 
         for entry in sorted(iterator, key=lambda e: (not e.is_dir(), e.name.lower())):
-            if not show_hidden and any(
-                part.startswith('.') for part in entry.relative_to(dir_path).parts
-            ):
-                continue
             if pattern and not recursive and not fnmatch.fnmatch(entry.name, pattern):
+                continue
+            if not show_hidden and _is_hidden_below(dir_path, entry, hidden):
                 continue
 
             count += 1

@@ -267,7 +267,7 @@ def _build_mcp() -> FastMCP:
     except ModuleNotFoundError as exc:
         _exit_missing_dependency(exc)
     from windows_mcp.tools.control_notifications import ControlNotifier, ControlToolGate
-    from windows_mcp.desktop.control import get_controller
+    from windows_mcp.desktop.control import describe_failure, get_controller
     from windows_mcp.desktop import control_overlay
 
     controller = get_controller()
@@ -292,10 +292,19 @@ def _build_mcp() -> FastMCP:
                 control_overlay.set_pending(True, generation=generation)
             else:
                 control_overlay.set_active(False, generation=generation)
-        except Exception:
+        except Exception as exc:
             # A missing visual indicator invalidates the AI control lease.
-            controller._fail_open()
+            release_control(f"AI control indicator failed: {describe_failure(exc)}")
             logger.exception("AI control indicator failed; releasing physical input")
+
+    def release_control(reason: str) -> None:
+        # Fail open without letting the reason plumbing raise or block.
+        # Controllers without fail_open_with_reason keep the plain fail-open.
+        fail_with_reason = getattr(controller, "fail_open_with_reason", None)
+        if callable(fail_with_reason):
+            fail_with_reason(reason)
+        else:
+            controller._fail_open()
 
     def show_control_state(status: dict) -> None:
         if threading.current_thread() is controller._thread or not (
@@ -313,8 +322,8 @@ def _build_mcp() -> FastMCP:
                         asyncio.to_thread(apply_control_state, status.copy())
                     )
                 )
-            except RuntimeError:
-                controller._fail_open()
+            except RuntimeError as exc:
+                release_control(f"Could not schedule AI control indicator: {describe_failure(exc)}")
                 logger.exception("Could not schedule AI control indicator update")
         else:
             # begin_call waits for the visible AI indicator before any tool runs.
@@ -885,6 +894,21 @@ def serve(
         raise
 
 
+def _client_host(host: str) -> str:
+    """Return the URL host for reaching a server bound to ``host`` from this machine.
+
+    A wildcard bind address is not one to connect to (Winsock rejects 0.0.0.0 with
+    WinError 10049), so use the loopback address of the same family, one of the
+    names ``_gen_tls`` asks mkcert for. IPv6 literals need brackets in a URL; an
+    address that already has them is kept as it is.
+    """
+    if host in ("0.0.0.0", ""):
+        return "127.0.0.1"
+    if host == "::":
+        return "[::1]"
+    return f"[{host}]" if ":" in host and not host.startswith("[") else host
+
+
 def _gen_tls(host: str, cert_path, key_path) -> None:
     """Generate a TLS cert/key pair, preferring mkcert over openssl."""
     from pathlib import Path
@@ -900,7 +924,7 @@ def _gen_tls(host: str, cert_path, key_path) -> None:
         if install.returncode != 0:
             raise click.ClickException(f"mkcert -install failed:\n{install.stderr.strip()}")
 
-        sans = [host] if host not in ("0.0.0.0", "") else ["localhost", "127.0.0.1", "::1"]
+        sans = [host] if host not in ("0.0.0.0", "::", "") else ["localhost", "127.0.0.1", "::1"]
         result = subprocess.run(
             [
                 "mkcert",
@@ -1154,8 +1178,9 @@ def auth(transport: str, host: str, port: int, with_tls: bool, force: bool) -> N
         return
 
     scheme = "https" if with_tls else "http"
-    mcp_url = f"{scheme}://{host}:{port}/mcp/"
-    sse_url = f"{scheme}://{host}:{port}/sse"
+    url_host = _client_host(host)
+    mcp_url = f"{scheme}://{url_host}:{port}/mcp/"
+    sse_url = f"{scheme}://{url_host}:{port}/sse"
 
     _echo_section("Start the server")
     click.echo("  windows-mcp serve")

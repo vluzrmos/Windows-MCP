@@ -169,9 +169,11 @@ def capture_desktop_state(
         stage_started_at = time.perf_counter()
 
     screenshot_bytes = None
+    screenshot_image = None
     local_vision_data: dict[str, object] | None = None
     if use_vision and desktop_state.screenshot is not None:
         pil_img = desktop_state.screenshot
+        screenshot_image = pil_img
         scale = desktop_state.screenshot_scale or 1.0
         coord_scale = round(1.0 / scale, 6) if scale > 0 else 1.0
         region_offset = (0, 0)
@@ -253,6 +255,7 @@ def capture_desktop_state(
         "active_desktop": active_desktop,
         "all_desktops": all_desktops,
         "screenshot_bytes": screenshot_bytes,
+        "screenshot_image": screenshot_image,
         "screenshot_format": image_format,
         "resolution_mode": resolution_mode,
         "vision_mode": resolved_vision_mode,
@@ -261,11 +264,26 @@ def capture_desktop_state(
     }
 
 
+def screenshot_png_bytes(capture_result: dict) -> bytes | None:
+    """Return the captured image as PNG bytes for ``save_path``.
+
+    ``screenshot_bytes`` is JPEG in compact mode and is dropped by the local
+    vision modes, so the file is encoded from the image itself instead.
+    """
+    image = capture_result.get("screenshot_image")
+    if image is None:
+        return None
+    buffered = io.BytesIO()
+    image.save(buffered, format="PNG")
+    return buffered.getvalue()
+
+
 def build_snapshot_response(
     capture_result: dict[str, object],
     *,
     include_ui_details: bool,
     ui_detail_note: str | None = None,
+    saved_path: str | None = None,
 ):
     desktop_state = capture_result["desktop_state"]
     interactive_elements = capture_result["interactive_elements"]
@@ -336,6 +354,8 @@ def build_snapshot_response(
             )
     if desktop_state.screenshot_backend:
         metadata_text += f"Screenshot Backend: {desktop_state.screenshot_backend}\n"
+    if saved_path:
+        metadata_text += f"Screenshot Saved To: {saved_path}\n"
     if ui_detail_note:
         metadata_text += f"{ui_detail_note}\n"
 

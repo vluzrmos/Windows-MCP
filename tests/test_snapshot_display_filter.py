@@ -777,3 +777,42 @@ class TestSnapshotTools:
         assert call["use_ui_tree"] is False
         assert call["use_dom"] is False
         assert call["use_annotation"] is False
+
+    # The fork defaults to winocr (no image returned) and compact JPEG; the saved
+    # file must still be a real PNG in both cases.
+    @pytest.mark.parametrize(("vision_mode", "parts"), [(None, 1), ("image", 2)])
+    def test_screenshot_tool_save_path_writes_file(
+        self, desktop_state, monkeypatch, tmp_path, vision_mode, parts
+    ):
+        fake_desktop = MagicMock()
+        fake_desktop.get_state.return_value = desktop_state
+        monkeypatch.setattr(main_module, "desktop", fake_desktop)
+        target = tmp_path / "shot.png"
+
+        result = asyncio.run(
+            main_module.screenshot_tool(save_path=str(target), vision_mode=vision_mode)
+        )
+
+        assert len(result) == parts
+        assert f"Screenshot Saved To: {target.resolve()}" in result[0]
+        assert target.read_bytes().startswith(b"\x89PNG")
+
+    def test_snapshot_tool_save_path_enables_vision(self, desktop_state, monkeypatch, tmp_path):
+        fake_desktop = MagicMock()
+        fake_desktop.get_state.return_value = desktop_state
+        monkeypatch.setattr(main_module, "desktop", fake_desktop)
+
+        result = asyncio.run(main_module.state_tool(save_path=str(tmp_path)))
+
+        assert fake_desktop.get_state.call_args.kwargs["use_vision"] is True
+        assert "Screenshot Saved To:" in result[0]
+        assert len(list(tmp_path.glob("screenshot-*.png"))) == 1
+
+    def test_screenshot_tool_save_path_error_is_reported(self, desktop_state, monkeypatch):
+        fake_desktop = MagicMock()
+        fake_desktop.get_state.return_value = desktop_state
+        monkeypatch.setattr(main_module, "desktop", fake_desktop)
+
+        result = asyncio.run(main_module.screenshot_tool(save_path="relative.png"))
+
+        assert result[0].startswith("Error saving screenshot:")
