@@ -17,6 +17,7 @@ from windows_mcp.tree.dom_text import extract_page_text
 from windows_mcp.desktop import screenshot as screenshot_capture
 from windows_mcp.desktop.control import get_controller
 from windows_mcp.desktop import flash_overlay
+from windows_mcp.desktop import human_mouse
 from windows_mcp.infrastructure import safe_get
 from windows_mcp.desktop import control_overlay
 from urllib.parse import urljoin
@@ -504,12 +505,42 @@ class Desktop:
         if not window_list:
             return None, "No windows found on the desktop."
 
-        windows = {window.name: window for window in window_list}
+        # Browsers and editors title their window after the open page or file
+        # ("<tab> - Pessoal — Microsoft Edge"), so a short app name scores below
+        # the cutoff against the full title. Match the app-name suffix and the
+        # process name too, and prefer an exact alias hit over a fuzzy one.
+        windows: dict[str, Window] = {}
+        for window in window_list:
+            for alias in self._window_aliases(window):
+                windows.setdefault(alias, window)
+        query = self._normalize_window_title(name).casefold()
+        for alias, window in windows.items():
+            if alias.casefold() == query:
+                return window, ""
         matched_window = process.extractOne(name, list(windows.keys()), score_cutoff=70)
         if matched_window is None:
             return None, f"Application {name.title()} not found."
         window_name, _ = matched_window
         return windows.get(window_name), ""
+
+    @staticmethod
+    def _normalize_window_title(title: str) -> str:
+        """Drop zero-width characters some apps put in titles (Edge puts U+200B in its name)."""
+        return re.sub(r"[​-‏⁠﻿]", "", title or "").strip()
+
+    @classmethod
+    def _window_aliases(cls, window: "Window") -> list[str]:
+        """Names a window can be found by: full title, app-name suffix, process name."""
+        title = cls._normalize_window_title(window.name)
+        aliases = [window.name, title]
+        parts = re.split(r"\s+[-–—]\s+", title)
+        if len(parts) > 1:
+            aliases.append(parts[-1])
+        try:
+            aliases.append(os.path.splitext(Process(window.process_id).name())[0])
+        except Exception:
+            pass
+        return [alias for alias in dict.fromkeys(aliases) if alias]
 
     def resize_app(
         self, name: str | None = None, size: tuple[int, int] = None, loc: tuple[int, int] = None
@@ -742,6 +773,13 @@ class Desktop:
                 element_node = tree_state.scrollable_nodes[scroll_idx]
             else:
                 raise IndexError(f"Label {label} out of range")
+        return self._label_target(element_node)
+
+    @staticmethod
+    def _label_target(element_node) -> tuple[int, int]:
+        """Center of a labelled element, or a random inner point in human mode."""
+        if human_mouse.is_enabled():
+            return human_mouse.pick_point_in_box(element_node.bounding_box)
         return element_node.center.x, element_node.center.y
 
     def get_coordinates_from_labels(self, labels: list[int]) -> list[tuple[int, int]]:
@@ -763,7 +801,7 @@ class Desktop:
                     element_node = scrollable_nodes[scroll_idx]
                 else:
                     raise IndexError(f"Label {label} out of range")
-            results.append((element_node.center.x, element_node.center.y))
+            results.append(self._label_target(element_node))
         return results
 
     @staticmethod
@@ -789,6 +827,53 @@ class Desktop:
                 f"x={left}..{right}, y={top}..{bottom}"
             )
 
+    _HUMAN_BUTTON_FLAGS = {
+        "left": (uia.MouseEventFlag.LeftDown, uia.MouseEventFlag.LeftUp),
+        "right": (uia.MouseEventFlag.RightDown, uia.MouseEventFlag.RightUp),
+        "middle": (uia.MouseEventFlag.MiddleDown, uia.MouseEventFlag.MiddleUp),
+    }
+
+    def _humanize_point(self, x: int, y: int) -> tuple[int, int]:
+        """Nudge a raw target by a pixel or two, keeping it on the desktop."""
+        jx, jy = human_mouse.jitter_point(x, y)
+        try:
+            self._validate_screen_point(jx, jy)
+        except ValueError:
+            return x, y
+        return jx, jy
+
+    def _human_glide(
+        self,
+        end: tuple[int, int],
+        start: tuple[int, int] | None = None,
+        duration: float | None = None,
+    ) -> None:
+        """Move the cursor to ``end`` along a human-like path, interruptibly."""
+        owner = get_controller()
+        if start is None:
+            start = uia.GetCursorPos()
+        for px, py, delay in human_mouse.plan_path(start, end, duration=duration):
+            owner.checkpoint_current()
+            uia.SetCursorPos(px, py)
+            owner.record_step_current()
+            if delay:
+                sleep(delay)
+
+    def _human_click(self, button: str, clicks: int, x: int, y: int) -> None:
+        """Glide to (x, y), settle, then click with human-like press timing."""
+        owner = get_controller()
+        self._human_glide((x, y))
+        sleep(human_mouse.pre_click_pause())
+        down, up = self._HUMAN_BUTTON_FLAGS[button]
+        dbl_wait = uia.GetDoubleClickTime() / 2000.0
+        for i in range(clicks):
+            owner.checkpoint_current()
+            uia.AbsoluteMouseEvent(down, x, y)
+            sleep(human_mouse.press_hold())
+            uia.AbsoluteMouseEvent(up, x, y)
+            owner.record_step_current()
+            sleep(dbl_wait * random.uniform(0.3, 0.6) if i < clicks - 1 else 0.5)
+
     def click(self, loc: tuple[int, int] | list[int], button: str = "left", clicks: int = 1):
         owner = get_controller()
         owner.checkpoint_current()
@@ -797,6 +882,13 @@ class Desktop:
         else:
             x, y = loc
         self._validate_screen_point(x, y)
+        if human_mouse.is_enabled():
+            x, y = self._humanize_point(x, y)
+            if clicks == 0:
+                self._human_glide((x, y))
+            elif button in self._HUMAN_BUTTON_FLAGS:
+                self._human_click(button, clicks, x, y)
+            return
         if clicks == 0:
             owner.checkpoint_current()
             uia.SetCursorPos(x, y)
@@ -848,7 +940,11 @@ class Desktop:
         owner.checkpoint_current()
         x, y = loc
         self._validate_screen_point(x, y)
-        uia.Click(x, y)
+        if human_mouse.is_enabled():
+            x, y = self._humanize_point(x, y)
+            self._human_click("left", 1, x, y)
+        else:
+            uia.Click(x, y)
         owner.record_step_current()
         if caret_position == "start":
             owner.checkpoint_current()
@@ -1016,6 +1112,8 @@ class Desktop:
             cx, cy = uia.GetCursorPos()
         else:
             cx, cy = normalized_from_loc
+        if human_mouse.is_enabled():
+            return self._human_drag((cx, cy), (x, y), effective_duration)
         try:
             owner.input_ledger.press(
                 "mouse:left",
@@ -1043,10 +1141,37 @@ class Desktop:
             owner.input_ledger.release("mouse:left")
         return {"start": [cx, cy], "end": [x, y], "duration": effective_duration}
 
+    def _human_drag(
+        self, start: tuple[int, int], end: tuple[int, int], duration: float | None
+    ) -> dict[str, object]:
+        """Drag with a human-like approach, press, curved stroke and release."""
+        owner = get_controller()
+        cx, cy = start
+        if uia.GetCursorPos() != (cx, cy):
+            self._human_glide((cx, cy))
+            sleep(human_mouse.pre_click_pause())
+        try:
+            owner.input_ledger.press(
+                "mouse:left",
+                lambda: uia.PressMouse(cx, cy, waitTime=human_mouse.press_hold()),
+                lambda: uia.ReleaseMouse(waitTime=0.05),
+                lambda: owner.physical_mouse_down("left"),
+            )
+            owner.record_step_current()
+            self._human_glide(end, start=(cx, cy), duration=duration)
+            # Let the drop target register the hover before the button comes up.
+            sleep(human_mouse.pre_click_pause())
+        finally:
+            owner.input_ledger.release("mouse:left")
+        return {"start": [cx, cy], "end": [end[0], end[1]], "duration": duration}
+
     def move(self, loc: tuple[int, int]):
         owner = get_controller()
         x, y = loc
         owner.checkpoint_current()
+        if human_mouse.is_enabled():
+            self._human_glide((x, y))
+            return
         cx, cy = uia.GetCursorPos()
         steps = max(1, min(80, max(abs(x - cx), abs(y - cy)) // 20))
         for step in range(1, steps + 1):
@@ -1081,6 +1206,9 @@ class Desktop:
                 )
             for x, y in points:
                 owner.checkpoint_current()
+                if human_mouse.is_enabled():
+                    self._human_glide((x, y))
+                    sleep(human_mouse.pre_click_pause())
                 uia.Click(x, y, waitTime=0.2)
                 owner.record_step_current()
                 sleep(0.5)

@@ -82,6 +82,7 @@ The codebase follows a layered service architecture under `src/windows_mcp/`:
 | `WINDOWS_MCP_WATCHDOG` | _(off)_ | Set to `on`/`1`/`true`/`yes`/`enabled` to start the UIA focus WatchDog thread. Unset, or any other value, leaves it off. Opt-in because it only emits debug logging today but can crash the server via the UIA event pump (#332). Resolved in `__main__.py`. |
 | `WINDOWS_MCP_DEBUG` | `false` | Set to `1`/`true`/`yes`/`on` to enable debug mode. Checked in `config.py`. Also available as `--debug` CLI flag. |
 | `WINDOWS_MCP_DISABLE_FLASH` | _(off)_ | Set to `1`/`true`/`yes`/`on` to suppress the orange-red glowing border that briefly appears after every screenshot. Resolved in `desktop/flash_overlay.py`. |
+| `WINDOWS_MCP_HUMAN_MOUSE` | _(off)_ | Set to `1`/`true`/`yes`/`on` for human-like mouse input: curved Bezier paths with ease-in/out speed, tremor and occasional overshoot instead of jumps; a short settle before clicks; random press timing; label clicks land at a random point inside the element (raw `loc` gets ≤2 px jitter). Applies to Click, Type, Move (incl. drag), Scroll and MultiSelect. Costs ~0.2–0.8 s per mouse action. Resolved in `desktop/human_mouse.py`. |
 
 ## Security Context
 
