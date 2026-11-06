@@ -11,6 +11,7 @@ from windows_mcp.tree.budget import TreeElementBudget, resolve_max_tree_elements
 from windows_mcp.tree.utils import random_point_within_bounding_box
 from windows_mcp.tree.word_runs import merge_word_nodes_enabled, merge_word_runs
 from windows_mcp.tree import ia2 as ia2_traversal
+from windows_mcp.elements.identity import ElementHandle
 from typing import TYPE_CHECKING,Optional,Any
 from time import sleep,perf_counter
 from _ctypes import COMError
@@ -109,10 +110,42 @@ class Tree:
         self.screen_box=desktop.get_screen_box()
         self.tree_state=None
         self.element_budget=TreeElementBudget(resolve_max_tree_elements())
+        # Logical depth limit for the semantic walk (None = unlimited). Only levels that
+        # appear in the semantic tree count, so anonymous wrapper chains (Chromium/
+        # Electron Group/Pane/Custom scaffolding) consume no depth.
+        self.max_depth:Optional[int]=None
+        self.container_nodes:list[TreeElementNode]=[]
+        self._window_handle:Optional[int]=None
+        self._window_pid:Optional[int]=None
 
 
-    def get_state(self,active_window_handle:int|None,other_windows_handles:list[int],use_dom:bool=False)->TreeState:
+    def _handle_for(self, node) -> Optional[ElementHandle]:
+        try:
+            return ElementHandle.from_cached(node, window_handle=self._window_handle, process_id=self._window_pid)
+        except Exception:
+            logger.debug("Could not capture element identity", exc_info=True)
+            return None
+
+    def _live_handle_for(self, control) -> Optional[ElementHandle]:
+        try:
+            return ElementHandle.from_live(control, window_handle=self._window_handle, process_id=self._window_pid)
+        except Exception:
+            return None
+
+    def _set_window_context(self, handle: Optional[int]) -> None:
+        self._window_handle = handle
+        self._window_pid = None
+        if handle:
+            try:
+                _, pid = win32process.GetWindowThreadProcessId(handle)
+                self._window_pid = pid or None
+            except Exception:
+                self._window_pid = None
+
+    def get_state(self,active_window_handle:int|None,other_windows_handles:list[int],use_dom:bool=False,max_depth:Optional[int]=None)->TreeState:
         # Reset DOM state to prevent leaks and stale data
+        self.max_depth = max_depth
+        self.container_nodes = []
         self.dom = None
         self.dom_bounding_box = None
         self.dom_is_ia2 = False
@@ -222,9 +255,97 @@ class Tree:
             semantic_tree_root=desktop_root,
             truncated=self.element_budget.truncated,
             element_limit=self.element_budget.limit,
+            container_nodes=list(self.container_nodes),
+            max_depth=max_depth,
         )
 
-    def get_window_wise_nodes(self,windows_handles:list[int],active_window_flag:bool,use_dom:bool=False) -> tuple[list[TreeElementNode],list[ScrollElementNode],list[TextElementNode],list[int],list[SemanticNode]]:
+    def get_subtree_state(self, root: ElementHandle, max_depth: Optional[int] = None) -> TreeState:
+        """Capture only the subtree under *root* (a drill-down from an earlier Snapshot).
+
+        Labels in the returned state cover just that region, which keeps dense apps
+        (IDEs, Electron clients, huge lists) cheap to read: take a shallow Snapshot with
+        ``max_depth``, then drill into the one container that matters.
+        """
+        self.max_depth = max_depth
+        self.container_nodes = []
+        self.dom = None
+        self.dom_bounding_box = None
+        self.dom_is_ia2 = False
+        self.element_budget = TreeElementBudget(resolve_max_tree_elements())
+        start_time = perf_counter()
+
+        window_handle = root.window_handle
+        self._set_window_context(window_handle)
+        window_name = "Window"
+        window_bounding_box = None
+        is_browser = False
+        if window_handle:
+            try:
+                window_control = ControlFromHandle(window_handle)
+                window_name = self.app_name_correction(window_control.Name.strip())
+                window_bounding_box = window_control.BoundingRectangle
+                is_browser = self.desktop.is_window_browser(window_control)
+            except Exception:
+                logger.debug("Drill: could not read the root's window", exc_info=True)
+
+        element_cache_req = CacheRequestFactory.create_tree_traversal_cache()
+        element_cache_req.TreeScope = TreeScope.TreeScope_Element
+        children_cache_req = CacheRequestFactory.create_tree_traversal_cache()
+        children_cache_req.TreeScope = TreeScope.TreeScope_Element | TreeScope.TreeScope_Children
+        # Verify the root is still alive and still the captured element first:
+        # build_cached_control falls back to the old (stale) cached node on failure.
+        from windows_mcp.elements.identity import read_live
+
+        read_live(root)
+        node = CachedControlHelper.build_cached_control(root.element, element_cache_req)
+        if window_bounding_box is None:
+            window_bounding_box = node.CachedBoundingRectangle
+
+        window_sem_node = SemanticNode(
+            control_type='Window', element_type='window', name=window_name, window_name=window_name,
+        )
+        interactive_nodes, scrollable_nodes, dom_interactive_nodes, dom_informative_nodes = [], [], [], []
+        self.tree_traversal(
+            node, window_bounding_box, window_name, is_browser,
+            interactive_nodes, scrollable_nodes, dom_interactive_nodes, dom_informative_nodes,
+            is_dom=False, is_dialog=False,
+            element_cache_req=element_cache_req, children_cache_req=children_cache_req,
+            current_semantic_node=window_sem_node,
+        )
+        _reverse_children_order(window_sem_node)
+        for n in dom_interactive_nodes:
+            window_sem_node.add_child(SemanticNode(
+                control_type=n.control_type, element_type='interactive', name=n.name,
+                window_name=n.window_name, center=n.center, bounding_box=n.bounding_box,
+                metadata=dict(n.metadata), source=n,
+            ))
+        interactive_nodes.extend(dom_interactive_nodes)
+
+        desktop_root = SemanticNode(control_type='Desktop', element_type='desktop', name='Desktop', window_name='Desktop')
+        desktop_root.add_child(window_sem_node)
+        _prune_structural(desktop_root)
+        screen_box = self.screen_box
+        end_time = perf_counter()
+        return TreeState(
+            status=True,
+            root_node=TreeElementNode(
+                name="Desktop", control_type="PaneControl", bounding_box=screen_box,
+                center=screen_box.get_center(), window_name="Desktop", metadata={},
+            ),
+            dom_node=None,
+            interactive_nodes=interactive_nodes,
+            scrollable_nodes=scrollable_nodes,
+            dom_informative_nodes=dom_informative_nodes,
+            capture_sec=end_time - start_time,
+            semantic_tree_root=desktop_root,
+            truncated=self.element_budget.truncated,
+            element_limit=self.element_budget.limit,
+            container_nodes=list(self.container_nodes),
+            max_depth=max_depth,
+            root_description=f'{root.describe()} in window "{window_name}"',
+        )
+
+    def get_window_wise_nodes(self,windows_handles:list[int],active_window_flag:bool,use_dom:bool=False) ->tuple[list[TreeElementNode],list[ScrollElementNode],list[TextElementNode],list[int],list[SemanticNode]]:
         """Process windows sequentially to avoid COM apartment threading deadlock.
 
         UI Automation requires STA (Single-Threaded Apartment). Using ThreadPoolExecutor
@@ -363,6 +484,7 @@ class Tree:
                     center=center,
                     bounding_box=bounding_box,
                     metadata={},
+                    source=word_node,
                 ))
 
 
@@ -467,7 +589,8 @@ class Tree:
                     is_dom:bool=False, is_dialog:bool=False,
                     element_cache_req:Optional[Any]=None, children_cache_req:Optional[Any]=None,
                     current_semantic_node:'Optional[SemanticNode]'=None,
-                    ancestor_runtime_ids:Optional[frozenset[tuple[int, ...]]]=None):
+                    ancestor_runtime_ids:Optional[frozenset[tuple[int, ...]]]=None,
+                    logical_depth:int=0):
         try:
             # Build cached control if caching is enabled
             if not hasattr(node, '_is_cached') and element_cache_req:
@@ -478,6 +601,7 @@ class Tree:
             control_type_name = node.CachedControlTypeName
             # class_name = node.CachedClassName
             semantic_added = False
+            added_semantic_node: Optional[SemanticNode] = None
 
             # A provider can hand back a child whose RuntimeId equals one of its own
             # ancestors (seen with an expanded Edge <select>), which sends this recursion
@@ -519,7 +643,7 @@ class Tree:
 
                             sem_scroll_name = name.strip() or automation_id or localized_control_type.capitalize() or "''"
                             self.element_budget.try_consume()
-                            scrollable_nodes.append(ScrollElementNode(**{
+                            scroll_node = ScrollElementNode(**{
                                 'name':sem_scroll_name,
                                 'control_type':localized_control_type.title(),
                                 'bounding_box':BoundingBox(**{
@@ -532,10 +656,12 @@ class Tree:
                                 }),
                                 'center':center,
                                 'window_name':window_name,
-                                'metadata':metadata
-                            }))
+                                'metadata':metadata,
+                                'element':self._handle_for(node),
+                            })
+                            scrollable_nodes.append(scroll_node)
                             if current_semantic_node is not None and not is_dom:
-                                current_semantic_node.add_child(SemanticNode(
+                                added_semantic_node = SemanticNode(
                                     control_type=localized_control_type.title(),
                                     element_type='scrollable',
                                     name=sem_scroll_name,
@@ -546,7 +672,9 @@ class Tree:
                                         width=box.width(), height=box.height()
                                     ),
                                     metadata=dict(metadata),
-                                ))
+                                    source=scroll_node,
+                                )
+                                current_semantic_node.add_child(added_semantic_node)
                                 semantic_added = True
                     except Exception:
                         pass
@@ -776,7 +904,8 @@ class Tree:
                                     'bounding_box':bounding_box,
                                     'center':center,
                                     'window_name':window_name,
-                                    'metadata':metadata
+                                    'metadata':metadata,
+                                    'element':self._handle_for(node),
                                 })
                                 self.element_budget.try_consume()
                                 dom_interactive_nodes.append(tree_node)
@@ -792,12 +921,13 @@ class Tree:
                                         'bounding_box':bounding_box,
                                         'center':center,
                                         'window_name':window_name,
-                                        'metadata':metadata
+                                        'metadata':metadata,
+                                        'element':self._handle_for(node),
                                     })
                                     self.element_budget.try_consume()
                                     interactive_nodes.append(tree_node)
                                     if current_semantic_node is not None:
-                                        current_semantic_node.add_child(SemanticNode(
+                                        added_semantic_node = SemanticNode(
                                             control_type=tree_node.control_type,
                                             element_type='interactive',
                                             name=tree_node.name,
@@ -805,7 +935,9 @@ class Tree:
                                             center=tree_node.center,
                                             bounding_box=tree_node.bounding_box,
                                             metadata=dict(tree_node.metadata),
-                                        ))
+                                            source=tree_node,
+                                        )
+                                        current_semantic_node.add_child(added_semantic_node)
                                         semantic_added = True
                                 self._append_word_nodes(word_elements, window_bounding_box, window_name, interactive_nodes, current_semantic_node)
 
@@ -853,11 +985,31 @@ class Tree:
                         )
                         current_semantic_node.add_child(struct_node)
                         semantic_parent = struct_node
+                        added_semantic_node = struct_node
                 except Exception:
                     pass
 
             # Phase 3: Cached Children Retrieval
             children = CachedControlHelper.get_cached_children(node, children_cache_req)
+
+            # Logical depth: only levels that show up in the semantic tree count, so
+            # anonymous wrappers (the Group/Pane/Custom chains web runtimes nest content
+            # in) are transparent. A semantic node at the depth limit keeps its children
+            # unexpanded and reports how many it hides.
+            child_depth = logical_depth + (1 if added_semantic_node is not None else 0)
+            if (
+                self.max_depth is not None
+                and added_semantic_node is not None
+                and child_depth >= self.max_depth
+                and children
+            ):
+                added_semantic_node.metadata['children_cut'] = len(children)
+                if added_semantic_node.source is None:
+                    container = self._container_node(node, window_bounding_box, window_name, added_semantic_node)
+                    if container is not None:
+                        added_semantic_node.source = container
+                        self.container_nodes.append(container)
+                return
 
             # Recursively traverse the tree the right to left for normal apps and for DOM traverse from left to right
             for child in (children if is_dom else reversed(children)):
@@ -875,7 +1027,7 @@ class Tree:
                         height=bounding_box.height())
                         self.dom=child
                         # enter DOM subtree
-                        self.tree_traversal(child, window_bounding_box, window_name, is_browser, interactive_nodes, scrollable_nodes, dom_interactive_nodes, dom_informative_nodes, is_dom=True, is_dialog=is_dialog, element_cache_req=element_cache_req, children_cache_req=children_cache_req, current_semantic_node=None, ancestor_runtime_ids=ancestor_runtime_ids)
+                        self.tree_traversal(child, window_bounding_box, window_name, is_browser, interactive_nodes, scrollable_nodes, dom_interactive_nodes, dom_informative_nodes, is_dom=True, is_dialog=is_dialog, element_cache_req=element_cache_req, children_cache_req=children_cache_req, current_semantic_node=None, ancestor_runtime_ids=ancestor_runtime_ids, logical_depth=child_depth)
                     # Check if the child is a dialog
                     elif isinstance(child,WindowControl):
                         if not child.CachedIsOffscreen:
@@ -895,10 +1047,10 @@ class Tree:
                                 if is_modal:
                                     interactive_nodes.clear()
                         # enter dialog subtree
-                        self.tree_traversal(child, window_bounding_box, window_name, is_browser, interactive_nodes, scrollable_nodes, dom_interactive_nodes, dom_informative_nodes, is_dom=is_dom, is_dialog=True, element_cache_req=element_cache_req, children_cache_req=children_cache_req, current_semantic_node=semantic_parent, ancestor_runtime_ids=ancestor_runtime_ids)
+                        self.tree_traversal(child, window_bounding_box, window_name, is_browser, interactive_nodes, scrollable_nodes, dom_interactive_nodes, dom_informative_nodes, is_dom=is_dom, is_dialog=True, element_cache_req=element_cache_req, children_cache_req=children_cache_req, current_semantic_node=semantic_parent, ancestor_runtime_ids=ancestor_runtime_ids, logical_depth=child_depth)
                     else:
                         # normal non-dialog children
-                        self.tree_traversal(child, window_bounding_box, window_name, is_browser, interactive_nodes, scrollable_nodes, dom_interactive_nodes, dom_informative_nodes, is_dom=is_dom, is_dialog=is_dialog, element_cache_req=element_cache_req, children_cache_req=children_cache_req, current_semantic_node=semantic_parent, ancestor_runtime_ids=ancestor_runtime_ids)
+                        self.tree_traversal(child, window_bounding_box, window_name, is_browser, interactive_nodes, scrollable_nodes, dom_interactive_nodes, dom_informative_nodes, is_dom=is_dom, is_dialog=is_dialog, element_cache_req=element_cache_req, children_cache_req=children_cache_req, current_semantic_node=semantic_parent, ancestor_runtime_ids=ancestor_runtime_ids, logical_depth=child_depth)
                 except TypeError as e:
                     if not _is_comtypes_variant_ord_typeerror(e):
                         raise
@@ -925,6 +1077,22 @@ class Tree:
                 return
             logger.error(f"Error in tree_traversal: {e}", exc_info=True)
             raise
+
+    def _container_node(self, node, window_bounding_box, window_name: str, semantic_node: SemanticNode) -> Optional[TreeElementNode]:
+        """A labelled stand-in for a structural container whose children were cut."""
+        try:
+            bounding_box = self.iou_bounding_box(window_bounding_box, node.CachedBoundingRectangle)
+        except Exception:
+            return None
+        return TreeElementNode(
+            name=semantic_node.name,
+            control_type=semantic_node.control_type,
+            bounding_box=bounding_box,
+            center=bounding_box.get_center(),
+            window_name=window_name,
+            metadata={'children_cut': semantic_node.metadata.get('children_cut', 0)},
+            element=self._handle_for(node),
+        )
 
     def app_name_correction(self,window_name:str)->str:
         match window_name:
@@ -953,6 +1121,7 @@ class Tree:
             children_cache_req.TreeScope = TreeScope.TreeScope_Element | TreeScope.TreeScope_Children
 
             window_bounding_box=node.BoundingRectangle
+            self._set_window_context(handle)
 
             interactive_nodes, dom_interactive_nodes, dom_informative_nodes, scrollable_nodes = [], [], [], []
             window_name=node.Name.strip()
@@ -1048,6 +1217,7 @@ class Tree:
                         center=n.center,
                         bounding_box=n.bounding_box,
                         metadata=dict(n.metadata),
+                        source=n,
                     ))
                 for text_node in dom_informative_nodes:
                     if text_node.text:

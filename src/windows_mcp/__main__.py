@@ -378,6 +378,12 @@ def _build_mcp() -> FastMCP:
                     control_loop = None
 
     _mcp = FastMCP(name="windows-mcp", instructions=instructions, lifespan=lifespan)
+    from windows_mcp.infrastructure.trace import build_trace_middleware
+
+    trace_middleware = build_trace_middleware()
+    if trace_middleware is not None:
+        # Outermost, so refused calls (user took control) are recorded too.
+        _mcp.add_middleware(trace_middleware)
     _mcp.add_middleware(ControlToolGate(controller, notifier))
     register_all(_mcp, get_desktop=_get_desktop, get_analytics=_get_analytics)
     return _mcp

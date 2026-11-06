@@ -5,7 +5,21 @@ omissions; unclassified extensions conservatively retain the desktop gate.
 """
 
 # Categories describe desktop interference, not whether an operation is destructive.
-DIRECT = frozenset({"Click", "Type", "Scroll", "Move", "Shortcut", "MultiSelect", "MultiEdit"})
+# Batch can run any input tool, and ElementAction changes UI state (it moves no cursor,
+# but it still acts on the user's desktop), so both take the desktop lease.
+DIRECT = frozenset(
+    {
+        "Click",
+        "Type",
+        "Scroll",
+        "Move",
+        "Shortcut",
+        "MultiSelect",
+        "MultiEdit",
+        "ElementAction",
+        "Batch",
+    }
+)
 POSSIBLE = frozenset({"PowerShell", "Notification"})
 OTHER = frozenset(
     {
@@ -17,6 +31,7 @@ OTHER = frozenset(
         "Wait",
         "WaitFor",
         "DisplayInventory",
+        "Find",
     }
 )
 MODES = {

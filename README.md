@@ -677,11 +677,11 @@ is still accepted for compatibility but no longer affects takeover.
 
 | Policy | Operations that require desktop ownership |
 |---|---|
-| `relaxed` (A, default) | Direct input: Click, Type, Scroll, Move, Shortcut, MultiSelect, MultiEdit; App `switch` and `resize`. |
+| `relaxed` (A, default) | Direct input: Click, Type, Scroll, Move, Shortcut, MultiSelect, MultiEdit, ElementAction, Batch; App `switch` and `resize`. |
 | `balanced` (B) | Everything in A, plus PowerShell, Notification, App `launch`/`launch_executable`, Process `kill`, and Clipboard `set`. |
 | `strict` (C) | All tools except ControlStatus, matching the previous gate behavior. |
 
-FileSystem, Registry, Snapshot, Screenshot, Scrape, Wait, WaitFor, DisplayInventory,
+FileSystem, Registry, Snapshot, Screenshot, Scrape, Wait, WaitFor, Find, DisplayInventory,
 Process `list`, and Clipboard `get` bypass ownership in A and B. This classification
 concerns desktop interference, not permissions or data safety. PowerShell can still
 operate the UI, and file/registry operations can have other side effects.
@@ -737,6 +737,8 @@ All variables are optional unless noted. Set them via the `env` key in `claude_d
 | `WINDOWS_MCP_PROFILE_SNAPSHOT` | _(disabled)_ | Set to `1`, `true`, `yes`, or `on` to emit per-stage timing logs for Screenshot/Snapshot calls. Useful for diagnosing slow captures. |
 | `WINDOWS_MCP_DISABLE_FLASH` | _(disabled)_ | Set to `1`, `true`, `yes`, or `on` to suppress the orange-red glowing border that briefly highlights the captured area after every screenshot. The flash is rendered on a transparent always-on-top window *after* capture so it never appears in the captured image. |
 | `WINDOWS_MCP_HUMAN_MOUSE` | _(disabled)_ | Set to `1`, `true`, `yes`, or `on` to make mouse input look human: the cursor glides along a slightly curved path with non-linear speed (and the occasional overshoot-and-correct) instead of jumping, pauses briefly before clicking, varies how long buttons are held, and clicks a random point inside labelled elements instead of their exact center. Drag-and-drop gets the same treatment. Adds roughly 0.2–0.8 s per mouse action. |
+| `WINDOWS_MCP_TRACE` | _(disabled)_ | Set to `1`, `true`, `yes`, or `on` to append a local JSONL audit trace of every tool call (time, tool, arguments, outcome, duration, error, first 500 characters of the result) to `~/.windows-mcp/traces/<timestamp>-<pid>.jsonl`, or set it to a directory path to write there instead. Nothing is sent anywhere. |
+| `WINDOWS_MCP_TRACE_REDACT` | `true` | With tracing on, the values of `text`, `value` and `content` arguments (including inside `Batch` steps) are recorded only as their length. Set to `false` to record them verbatim. Traces can still contain private desktop content (window titles, paths, commands): treat them like screenshots. |
 | `WINDOWS_MCP_MERGE_WORD_NODES` | _(disabled)_ | Set to `1`, `true`, `yes`, or `on` to merge adjacent `Word` leaves on the same text line into one node. Electron/Chromium apps can report one word per glyph (each CJK character becomes its own node), which can dominate `Snapshot` output; merging keeps one clickable node per text run. Leave it off when you need to click individual words. |
 
 ### Excluding processes from UI Automation traversal
@@ -859,8 +861,32 @@ Remote (with auth + IP allowlist + TLS):
 
 MCP Client can access the following tools to interact with Windows:
 
-- `Click`: Click on the screen at the given coordinates.
-- `Type`: Type text on an element (optionally clears existing text).
+- `Click`: Click at the given coordinates or on a Snapshot label (`#N`). Labels are
+  verified live before the click: the element must still exist and be the same element
+  (otherwise `STALE_REF`), and the click auto-waits (`wait_timeout`, default 3 s) until it
+  is visible, stable, enabled and not covered by another window, scrolling it into view
+  when needed. `snapshot_id` rejects a label from an older capture. `mode='semantic'`
+  activates the element through UI Automation (Invoke/Toggle/Select/Expand) without moving
+  the mouse or taking focus; `mode='auto'` uses that for plain left clicks and falls back to
+  the physical click. Results end with a delivery disposition (`not_delivered`,
+  `delivered_unverified`, `delivered_verified`, …) and whether a retry is safe, and name any
+  menu or dialog the click opened.
+- `Type`: Type text on an element (optionally clears existing text). Labels are verified and
+  auto-waited like in `Click`; `mode='semantic'` writes through ValuePattern and reads the
+  value back.
+- `ElementAction`: Act on a label through UI Automation patterns — `invoke`, `toggle`,
+  `check`, `uncheck`, `expand`, `collapse`, `select`, `add_to_selection`,
+  `remove_from_selection`, `set_value`, `clear`, `focus`, `scroll_into_view`, `read`. No
+  cursor movement or focus stealing; works on background and covered windows. State changes
+  are read back (`delivered_verified`), and `check`/`expand`-style actions are idempotent.
+  Controls that only react to real pointer or keyboard events may ignore these actions.
+- `Find`: Search the UI by name, control type, AutomationId, value, text or state and get
+  only the matches with their labels — optionally scoped to a window (`window_name`) or to
+  the subtree of a label (`root_label`). Lists the control types present when a type matches
+  nothing.
+- `Batch`: Run up to 32 tool calls in order in one request. The whole list is validated
+  before anything runs; steps are sequential and not atomic, with `stop_on_error` and an
+  overall `timeout`.
 - `Scroll`: Scroll vertically or horizontally on the window or specific regions.
 - `Move`: Move mouse pointer or drag (set drag=True) to coordinates. For deterministic
   drag, set `from_loc=[x, y]` with `drag=True` to press at an explicit start point and
@@ -869,14 +895,29 @@ MCP Client can access the following tools to interact with Windows:
   pinned taskbar buttons: they ignore synthesized mouse input, so the drag silently does
   nothing while the call still succeeds. Use their context-menu commands (`Move to front`,
   `Move left`, `Move right` on Start menu tiles) instead.
-- `Shortcut`: Press keyboard shortcuts (`Ctrl+c`, `Alt+Tab`, etc).
+- `Shortcut`: Press keyboard shortcuts (`Ctrl+c`, `Ctrl+s`, etc). Shortcuts that take the
+  foreground away or change the session (`alt+f4`, `win+l`, `win+d`, `alt+tab`, `win+r`,
+  `win+x`, `win+e`, `ctrl+shift+esc`, and any combo that adds modifiers to them) are refused
+  unless `force=True`.
 - `Wait`: Pause for a defined duration.
-- `WaitFor`: Wait until text, an active window, an element, or a focused element appears by polling UI state inside one tool call.
+- `WaitFor`: Wait for a condition inside one tool call instead of fixed sleeps. Tree
+  conditions: `text_exists`, `text_gone`, `active_window`, `element_exists`, `element_gone`
+  (e.g. a spinner disappearing), `element_enabled`, `focused_element`. Cheap live conditions
+  that do not re-capture the tree: `window_opened`/`window_closed`, `menu_open`/`menu_closed`,
+  `dialog_open`/`dialog_closed`, `process_started`/`process_exited`, and for one label
+  `element_value`, `element_actionable`, `element_stale`. A timeout reports what was last
+  observed.
 - `ControlStatus`: Read the desktop control owner and remaining user-idle wait. It stays available when user takeover blocks new tool calls. During AI control, a visible edge and cursor glow indicate ownership; moving the physical mouse substantially or pressing `Ctrl+Alt+Shift+Backspace` returns control to the user until 10 seconds of inactivity. During screenshot capture, the indicator is temporarily hidden and physical input is released; any physical input during this interval preempts AI control, although `ControlStatus` can briefly still report `ai` until that event is processed. Stepwise desktop input stops at its next checkpoint, but an already-running external command (for example `PowerShell` or an `App` launch) may continue after takeover; this control gate does not cancel processes or undo completed side effects. On a detected hook fault, injected keys and mouse buttons are released asynchronously, so physical input can briefly overlap a still-held AI key or button. Windows may also silently remove a low-level hook without notifying this process; periodic hook replacement reduces but does not eliminate that undetected window. User takeover is therefore best-effort, not a security boundary or a guarantee of exclusive control.
   Sessionless MCP 2026-07-28 clients cannot receive unsolicited control-state logs; they should query `ControlStatus` when they need the current owner.
 - `DisplayInventory`: Read display layout, work areas, effective DPI, and scale metadata.
 - `Screenshot`: Fast screenshot-first desktop capture with cursor position, active/open windows, and an image. Skips UI tree extraction for speed and should be the default first call when you mainly need visual context. Supports `display=[0]` or `display=[0,1]` using zero-based active Windows display indices, and `region=[left, top, right, bottom]` (virtual-desktop pixel coordinates) to capture just that rectangle instead of the whole screen — cheaper on tokens when you already know which area matters. `region` takes precedence over `display` when both are given; an invalid or out-of-bounds region raises an error. After capture, a brief orange-red glowing border is drawn inside the captured area as a visual confirmation (set `WINDOWS_MCP_DISABLE_FLASH=1` to disable).
-- `Snapshot`: Full desktop state capture for workflows that need interactive element ids, scrollable regions, or `use_dom=True` browser extraction. Supports `use_vision=True` for including screenshots, `display=[0]` or `display=[0,1]` using zero-based active Windows display indices, and `region=[left, top, right, bottom]` (virtual-desktop pixel coordinates) to inspect just that rectangle instead of the whole screen; `region` takes precedence over `display` when both are given, and an invalid or out-of-bounds region raises an error.
+- `Snapshot`: Full desktop state capture for workflows that need interactive element ids, scrollable regions, or `use_dom=True` browser extraction. Supports `use_vision=True` for including screenshots, `display=[0]` or `display=[0,1]` using zero-based active Windows display indices, and `region=[left, top, right, bottom]` (virtual-desktop pixel coordinates) to inspect just that rectangle instead of the whole screen; `region` takes precedence over `display` when both are given, and an invalid or out-of-bounds region raises an error. Every labelled element is shown as
+  `#N` together with a Snapshot ID. For dense apps, `skeleton=True` (or `max_depth=N`) reads
+  a shallow map where cut containers report `[+N children not expanded]`, and
+  `root_label=N` drills into just that region. Only semantic levels count toward the depth,
+  so the anonymous wrapper chains of Chromium/Electron apps cost nothing. `surface` reads a
+  single UI layer: `menu`, `dialog`, `focused`, `taskbar`, `system_tray`, `start_menu` or
+  `action_center`.
 - `App`: Launch an application by Start Menu name or strictly by executable path with separated argv and optional cwd; resize, move, and switch between windows.
 - `PowerShell`: To execute PowerShell commands.
 - `FileSystem`: Read, write, copy, move, delete, list, search, and inspect files and directories.
@@ -884,7 +925,9 @@ MCP Client can access the following tools to interact with Windows:
 - `MultiSelect`: Select multiple items (files, folders, checkboxes) with optional Ctrl key. Uses bulk label-to-coordinate resolution when labels are provided.
 - `MultiEdit`: Enter text into multiple input fields at specified coordinates. Uses bulk label-to-coordinate resolution when labels are provided.
 - `Clipboard`: Read or set Windows clipboard content.
-- `Process`: List running processes or terminate them by PID or name.
+- `Process`: List running processes or terminate them by PID or name. Session-critical
+  processes (`csrss`, `wininit`, `winlogon`, `services`, `lsass`, `smss`, `lsaiso`, `dwm`,
+  `explorer`) are never terminated, even with `force=True`.
 - `Notification`: Send a Windows toast notification with `title`, `message`, and a required `app_id` (registered Windows AppUserModelID). See the example below.
 - `Registry`: Read, write, delete, or list Windows Registry values and keys.
 

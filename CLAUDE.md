@@ -4,13 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Windows-MCP is a Python MCP (Model Context Protocol) server that bridges AI LLM agents with the Windows OS, enabling direct desktop automation. It exposes 21 tools via FastMCP:
+Windows-MCP is a Python MCP (Model Context Protocol) server that bridges AI LLM agents with the Windows OS, enabling direct desktop automation. It exposes 24 tools via FastMCP:
 
 | Group | Tools |
 |---|---|
-| Capture | `Screenshot`, `Snapshot`, `Scrape`, `DisplayInventory` |
-| Input | `Click`, `Type`, `Scroll`, `Move` (also drag-and-drop via `drag=True`), `Shortcut`, `MultiSelect`, `MultiEdit` |
-| Timing | `Wait`, `WaitFor` |
+| Capture | `Screenshot`, `Snapshot`, `Scrape`, `DisplayInventory`, `Find` |
+| Input | `Click`, `Type`, `Scroll`, `Move` (also drag-and-drop via `drag=True`), `Shortcut`, `MultiSelect`, `MultiEdit`, `ElementAction` |
+| Timing | `Wait`, `WaitFor`, `Batch` |
 | System | `App`, `PowerShell`, `FileSystem`, `Registry`, `Process`, `Clipboard`, `Notification`, `ControlStatus` |
 
 Tool names are defined by the `name=` argument of each `@mcp.tool(...)` in `src/windows_mcp/tools/`; that directory is the source of truth. Note the shell tool is registered as `PowerShell`, not `Shell`. Any subset can be removed at startup with `serve --exclude-tools` (e.g. `windows-mcp serve --exclude-tools PowerShell,Registry`).
@@ -45,11 +45,13 @@ The codebase follows a layered service architecture under `src/windows_mcp/`:
 
 **WatchDog** — `watchdog/service.py`: Runs in a separate thread monitoring UI focus changes via UIAutomation events. Notifies the Tree service of focus changes so the accessibility tree stays current.
 
+**Elements** — `elements/`: what makes a Snapshot label safe to act on. Each labelled tree node keeps an `ElementHandle` (live UIA element + RuntimeId/control type/AutomationId captured during the walk). `resolve.py` is the single label path every input tool uses: snapshot-id check → live identity check (`STALE_REF`) → `actionability.py` auto-wait (visible, stable, enabled, hit-test not covered, ScrollIntoView once) → UIPI integrity check (`safety.py`). `semantic.py` performs UIA pattern actions with read-back verification; `report.py` defines delivery dispositions (`not_delivered`/`delivered_unverified`/`delivered_verified`/…) and `ElementError`. `waits.py` holds WaitFor's cheap live predicates. Surfaces (menus, dialogs, shell flyouts) are detected with pure Win32 in `desktop/surfaces.py`.
+
 **Virtual Desktop Manager** — `vdm/core.py`: Tracks which windows belong to which Windows virtual desktop (Win10/11).
 
 **Domain services** — thin packages backing the system tools: `filesystem/` (read/write/copy/move/delete/list/search/info), `registry/` (get/set/delete/list, implemented via PowerShell cmdlets), `powershell/` (`PowerShellExecutor` plus environment resolution), `process/` (list/kill), `notifications/`. Registry and PowerShell tools shell out, so their latency is dominated by process startup.
 
-**Infrastructure** — `infrastructure/`: cross-cutting concerns. `analytics.py` (optional PostHog telemetry, disabled with `ANONYMIZED_TELEMETRY=false`; records tool names and errors only, never arguments or outputs), `auth.py` and `oauth.py` (bearer-token and OAuth middleware for HTTP transports), `security.py` (SSRF validation, IP allowlist middleware), `config.py` (server configuration). Note `windows_mcp/config.py` at the package root is unrelated — it only holds the `WINDOWS_MCP_DEBUG` helpers.
+**Infrastructure** — `infrastructure/`: cross-cutting concerns. `analytics.py` (optional PostHog telemetry, disabled with `ANONYMIZED_TELEMETRY=false`; records tool names and errors only, never arguments or outputs), `auth.py` and `oauth.py` (bearer-token and OAuth middleware for HTTP transports), `security.py` (SSRF validation, IP allowlist middleware), `config.py` (server configuration), `trace.py` (opt-in local JSONL audit trace middleware). Note `windows_mcp/config.py` at the package root is unrelated — it only holds the `WINDOWS_MCP_DEBUG` helpers.
 
 ## Code Style
 
@@ -80,10 +82,12 @@ The codebase follows a layered service architecture under `src/windows_mcp/`:
 | `POSTHOG_API_KEY` | Project default | Override the PostHog project write key used for anonymous telemetry. Set to an empty string to skip PostHog client initialization. Checked in `infrastructure/analytics.py`. |
 | `POSTHOG_HOST` | `https://us.i.posthog.com` | Override the PostHog host for anonymous telemetry, such as for a self-hosted PostHog deployment. Checked in `infrastructure/analytics.py`. |
 | `WINDOWS_MCP_WATCHDOG` | _(off)_ | Set to `on`/`1`/`true`/`yes`/`enabled` to start the UIA focus WatchDog thread. Unset, or any other value, leaves it off. Opt-in because it only emits debug logging today but can crash the server via the UIA event pump (#332). Resolved in `__main__.py`. |
+| `WINDOWS_MCP_TRACE` | _(off)_ | `1`/`true`/`yes`/`on` writes a local JSONL audit trace of every tool call to `~/.windows-mcp/traces/`; any other value is the directory to write to. Resolved in `infrastructure/trace.py`. |
+| `WINDOWS_MCP_TRACE_REDACT` | `true` | With tracing on, `text`/`value`/`content` argument values are recorded as their length only; `false` records them verbatim. |
 | `WINDOWS_MCP_DEBUG` | `false` | Set to `1`/`true`/`yes`/`on` to enable debug mode. Checked in `config.py`. Also available as `--debug` CLI flag. |
 | `WINDOWS_MCP_DISABLE_FLASH` | _(off)_ | Set to `1`/`true`/`yes`/`on` to suppress the orange-red glowing border that briefly appears after every screenshot. Resolved in `desktop/flash_overlay.py`. |
 | `WINDOWS_MCP_HUMAN_MOUSE` | _(off)_ | Set to `1`/`true`/`yes`/`on` for human-like mouse input: curved Bezier paths with ease-in/out speed, tremor and occasional overshoot instead of jumps; a short settle before clicks; random press timing; label clicks land at a random point inside the element (raw `loc` gets ≤2 px jitter). Applies to Click, Type, Move (incl. drag), Scroll and MultiSelect. Costs ~0.2–0.8 s per mouse action. Resolved in `desktop/human_mouse.py`. |
 
 ## Security Context
 
-This server has **full system access** with no sandboxing. `PowerShell`, `FileSystem`, `Registry`, `Process`, and `App` can all perform irreversible operations, and there is no audit log or rollback. The recommended deployment target is a VM or Windows Sandbox. Use `serve --exclude-tools` to drop the tools a given deployment does not need.
+This server has **full system access** with no sandboxing. `PowerShell`, `FileSystem`, `Registry`, `Process`, and `App` can all perform irreversible operations, and there is no rollback (an opt-in local audit trace exists: `WINDOWS_MCP_TRACE`). Built-in guards: `Process` never kills session-critical processes, `Shortcut` refuses session-changing combos without `force=True`, and label-based input refuses targets running at a higher integrity level (UIPI would silently drop the input). The recommended deployment target is a VM or Windows Sandbox. Use `serve --exclude-tools` to drop the tools a given deployment does not need.

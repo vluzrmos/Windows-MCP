@@ -118,23 +118,39 @@ class SemanticNode:
     bounding_box: Optional["BoundingBox"] = None
     metadata: dict[str, Any] = field(default_factory=dict)
     children: list["SemanticNode"] = field(default_factory=list)
+    # The flat-list node (TreeElementNode/ScrollElementNode/container) this semantic
+    # node renders, so the tree text can show the label an action tool accepts.
+    source: Any = field(default=None, repr=False, compare=False)
 
     def add_child(self, child: "SemanticNode") -> None:
         self.children.append(child)
 
 
+def _label_prefix(node: SemanticNode) -> str:
+    label = getattr(node.source, "label", None)
+    return f"#{label} " if label is not None else ""
+
+
+def _cut_suffix(node: SemanticNode) -> str:
+    cut = node.metadata.get("children_cut")
+    if not cut:
+        return ""
+    return f"  [+{cut} children not expanded — drill with Snapshot(root_label=...)]"
+
+
 def _format_semantic_node(node: SemanticNode) -> str:
     ctrl = node.control_type.lower()
     name = node.name
+    prefix = _label_prefix(node)
     if node.element_type == "window":
         return f'window "{name}"'
     if node.element_type == "structural":
-        return f'{ctrl} "{name}"'
+        return f'{prefix}{ctrl} "{name}"{_cut_suffix(node)}'
     if node.element_type in ("interactive", "scrollable"):
         coords = node.center.to_string() if node.center else "(?)"
         action = _action_for(ctrl)
         meta = _node_meta_str(node.metadata) if node.element_type == "interactive" else _scroll_meta_str(node.metadata)
-        return f'{coords} {ctrl} "{name}"  [action: {action}]{meta}'
+        return f'{prefix}{coords} {ctrl} "{name}"  [action: {action}]{meta}{_cut_suffix(node)}'
     return f'{ctrl} "{name}"'
 
 
@@ -157,7 +173,7 @@ def _render_semantic_node(node: SemanticNode, lines: list[str], prefix: str, is_
 def _prune_structural(node: SemanticNode) -> bool:
     """Remove structural nodes that ended up with no children. Returns True = keep."""
     node.children = [c for c in node.children if _prune_structural(c)]
-    if node.element_type == "structural" and not node.children:
+    if node.element_type == "structural" and not node.children and not node.metadata.get("children_cut"):
         return False
     return True
 
@@ -181,6 +197,20 @@ class TreeState:
     semantic_tree_root: "SemanticNode | None" = None
     truncated: bool = False
     element_limit: int = 0
+    # Containers whose children a depth limit cut; labelled after the scrollables so
+    # Snapshot(root_label=...) can drill into them.
+    container_nodes: list["TreeElementNode"] = field(default_factory=list)
+    snapshot_id: str | None = None
+    max_depth: int | None = None
+    root_description: str | None = None
+
+    def labelled_nodes(self) -> list[Any]:
+        """Every labelled node in label order: interactive, scrollable, containers."""
+        return [*self.interactive_nodes, *self.scrollable_nodes, *self.container_nodes]
+
+    def assign_labels(self) -> None:
+        for index, node in enumerate(self.labelled_nodes()):
+            node.label = index
 
     def semantic_tree_to_string(self) -> str:
         if not self.semantic_tree_root:
@@ -262,6 +292,10 @@ class TreeElementNode:
     control_type: str = ""
     window_name: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Live UIA element + identity evidence (windows_mcp.elements.identity.ElementHandle);
+    # None for synthetic nodes such as text-word runs or IA2/Firefox DOM nodes.
+    element: Any = field(default=None, repr=False, compare=False)
+    label: Optional[int] = field(default=None, compare=False)
 
     def update_from_node(self, node: "TreeElementNode"):
         self.name = node.name
@@ -270,6 +304,7 @@ class TreeElementNode:
         self.bounding_box = node.bounding_box
         self.center = node.center
         self.metadata = node.metadata
+        self.element = node.element
 
 
 @dataclass
@@ -280,6 +315,8 @@ class ScrollElementNode:
     bounding_box: BoundingBox
     center: Center
     metadata: dict[str, Any] = field(default_factory=dict)
+    element: Any = field(default=None, repr=False, compare=False)
+    label: Optional[int] = field(default=None, compare=False)
 
 
 @dataclass

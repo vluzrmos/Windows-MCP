@@ -15,6 +15,32 @@ def _as_loc(value: list | str | None) -> list | None:
     return json.loads(value)
 
 
+def _verified_points(desktop, labels: list[int], points: list) -> list[list[int]]:
+    """Re-verify each labelled element live and aim at where it is now.
+
+    Nodes without a UI Automation element keep their captured coordinates. A label
+    whose element is gone raises STALE_REF before any input is sent.
+    """
+    from windows_mcp.elements.actionability import wait_until_actionable
+    from windows_mcp.elements.resolve import element_of
+
+    verified = []
+    for label, point in zip(labels, points):
+        try:
+            node = desktop.get_node_from_label(label)
+        except Exception:
+            node = None
+        handle = element_of(node)
+        if handle is None:
+            verified.append(list(point))
+            continue
+        result = wait_until_actionable(
+            handle, pointer=True, timeout=3.0, label=label, preferred_point=tuple(point)
+        )
+        verified.append(list(result.point or point))
+    return verified
+
+
 def register(mcp, *, get_desktop, get_analytics):
     @mcp.tool(
         name="MultiSelect",
@@ -45,9 +71,9 @@ def register(mcp, *, get_desktop, get_analytics):
                 raise ValueError("Desktop state is empty. Please call Snapshot first.")
             try:
                 resolved_locs = desktop.get_coordinates_from_labels(labels)
-                locs.extend([list(loc) for loc in resolved_locs])
             except Exception as e:
                 raise ValueError(f"Failed to resolve labels {labels}: {e}")
+            locs.extend(_verified_points(desktop, labels, resolved_locs))
 
         press_ctrl = _as_bool(press_ctrl, "press_ctrl")
         desktop.multi_select(press_ctrl, locs)
@@ -91,13 +117,14 @@ def register(mcp, *, get_desktop, get_analytics):
                 except (ValueError, TypeError):
                     raise ValueError(f"Invalid label id in item: {item}")
 
+            label_ids = [item[0] for item in processed_labels]
             try:
-                label_ids = [item[0] for item in processed_labels]
                 resolved_coords = desktop.get_coordinates_from_labels(label_ids)
-                for (x, y), (_, text) in zip(resolved_coords, processed_labels):
-                    locs.append([x, y, text])
             except Exception as e:
                 raise ValueError(f"Failed to process labels: {e}")
+            resolved_coords = _verified_points(desktop, label_ids, resolved_coords)
+            for (x, y), (_, text) in zip(resolved_coords, processed_labels):
+                locs.append([x, y, text])
 
         desktop.multi_edit(locs)
         elements_str = ", ".join([f"({e[0]},{e[1]}) with text '{e[2]}'" for e in locs])

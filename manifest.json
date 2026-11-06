@@ -133,7 +133,19 @@
     },
     {
       "name": "WaitFor",
-      "description": "Waits until a UI condition is met by polling the accessibility tree inside a single call, avoiding repeated Snapshot calls. Conditions: text_exists, active_window, element_exists, element_enabled, focused_element. Provide text and/or window_name depending on the condition. Set use_dom=True to match browser DOM text."
+      "description": "Waits until a UI condition is met by polling inside a single call, avoiding repeated Snapshot calls. Tree conditions: text_exists, text_gone, active_window, element_exists, element_gone, element_enabled, focused_element. Live conditions: window_opened/window_closed, menu_open/menu_closed, dialog_open/dialog_closed, process_started/process_exited, and for a Snapshot label element_value, element_actionable, element_stale. On timeout it reports what was last observed."
+    },
+    {
+      "name": "ElementAction",
+      "description": "Acts on a UI element by label through UI Automation patterns (invoke, toggle, check, uncheck, expand, collapse, select, set_value, clear, focus, scroll_into_view, read) without moving the mouse or stealing focus. Verifies the label live first and reports delivery and retry safety."
+    },
+    {
+      "name": "Find",
+      "description": "Finds UI elements by name, control type, AutomationId, value, text or state and returns only the matches with their labels, optionally scoped to a window or to the subtree of a label."
+    },
+    {
+      "name": "Batch",
+      "description": "Runs up to 32 tool calls in order in one request, validating the whole list first; sequential and not atomic, with stop_on_error and an overall timeout."
     },
     {
       "name": "Scrape",

@@ -45,11 +45,14 @@ pytestmark = pytest.mark.skipif(
 # guard on the tool surface: adding or renaming a tool must update this list.
 EXPECTED_TOOLS = {
     "App",
+    "Batch",
     "Click",
     "Clipboard",
     "ControlStatus",
     "DisplayInventory",
+    "ElementAction",
     "FileSystem",
+    "Find",
     "Move",
     "MultiEdit",
     "MultiSelect",

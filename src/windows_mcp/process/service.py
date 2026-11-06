@@ -76,13 +76,19 @@ def kill_process(
 ) -> str:
     import psutil
 
+    from windows_mcp.elements.safety import is_protected_process
+
     if pid is None and name is None:
         return "Error: Provide either pid or name parameter for kill mode."
+    if name is not None and is_protected_process(name):
+        return _protected_refusal(name)
     killed = []
     if pid is not None:
         try:
             p = psutil.Process(pid)
             pname = p.name()
+            if is_protected_process(pname):
+                return _protected_refusal(f"{pname} (PID {pid})")
             if force:
                 p.kill()
             else:
@@ -106,3 +112,12 @@ def kill_process(
     if not killed:
         return f'No process matching "{name}" found or access denied.'
     return f"{'Force killed' if force else 'Terminated'}: {', '.join(killed)}"
+
+
+def _protected_refusal(target: str) -> str:
+    return (
+        f"Refused: {target} is a session-critical Windows process (csrss, wininit, "
+        "winlogon, services, lsass, smss, lsaiso, dwm, explorer). Terminating it would "
+        "break the user's desktop session, so the Process tool never kills it, even with "
+        "force=True. [not_delivered]"
+    )

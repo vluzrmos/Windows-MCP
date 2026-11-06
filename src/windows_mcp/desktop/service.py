@@ -110,6 +110,13 @@ def _shortcut_to_sendkeys(shortcut: str) -> str:
     return sendkeys_str
 
 
+def _new_snapshot_id() -> str:
+    """Short random id for one UI-tree capture (labels are only valid inside it)."""
+    import secrets
+
+    return "s" + secrets.token_hex(3)
+
+
 def _snapshot_profile_enabled() -> bool:
     value = os.getenv("WINDOWS_MCP_PROFILE_SNAPSHOT", "")
     return value.strip().lower() in {"1", "true", "yes", "on"}
@@ -152,7 +159,19 @@ class Desktop:
         display_indices: list[int] | None = None,
         region: list[int] | tuple[int, ...] | None = None,
         max_image_size: Size | None = None,
+        max_depth: int | None = None,
+        root_element=None,
+        only_handles: list[int] | None = None,
     ) -> DesktopState:
+        """Capture the desktop state.
+
+        Args:
+            max_depth: Logical depth limit for the UI tree (None = unlimited). Containers
+                at the limit are labelled and report how many children they hide.
+            root_element: An ``ElementHandle`` to drill into: only its subtree is read.
+            only_handles: Restrict the UI tree to these top-level window handles (used
+                by window-scoped Find/WaitFor and by Snapshot surfaces).
+        """
         use_annotation = use_annotation is True or (
             isinstance(use_annotation, str) and use_annotation.lower() == "true"
         )
@@ -242,9 +261,23 @@ class Desktop:
                     for window in windows
                     if self._filter_window_to_region(window, screenshot_region) is not None
                 )
-            tree_state = self.tree.get_state(
-                tree_active_window_handle, list(other_windows_handles), use_dom=use_dom
-            )
+            if only_handles is not None:
+                allowed = [int(handle) for handle in only_handles]
+                tree_active_window_handle = (
+                    tree_active_window_handle if tree_active_window_handle in allowed else None
+                )
+                other_windows_handles = {
+                    handle for handle in allowed if handle != tree_active_window_handle
+                }
+            if root_element is not None:
+                tree_state = self.tree.get_subtree_state(root_element, max_depth=max_depth)
+            else:
+                tree_state = self.tree.get_state(
+                    tree_active_window_handle,
+                    list(other_windows_handles),
+                    use_dom=use_dom,
+                    max_depth=max_depth,
+                )
         else:
             root_box = screenshot_region or self.tree.screen_box
             tree_state = TreeState(
@@ -268,6 +301,11 @@ class Desktop:
             windows = self._filter_windows_to_region(windows, screenshot_region)
             if use_ui_tree:
                 tree_state = self._filter_tree_state_to_region(tree_state, screenshot_region)
+        if use_ui_tree:
+            # Labels are the index of each node in label order; the snapshot id lets an
+            # action tool reject a label that belongs to an older capture.
+            tree_state.assign_labels()
+            tree_state.snapshot_id = _new_snapshot_id()
 
         # Desktop queries and UI tree traversal can be slow. Sample the cursor
         # afterwards to keep the metadata and annotation close to capture time.
@@ -761,19 +799,24 @@ class Desktop:
         except Exception as e:
             logger.exception(f"Failed to bring window to top: {e}")
 
-    def get_coordinates_from_label(self, label: int) -> tuple[int, int]:
+    def get_node_from_label(self, label: int):
+        """The labelled node (interactive, scrollable or cut container) for *label*."""
+        if self.desktop_state is None or self.desktop_state.tree_state is None:
+            raise ValueError("Desktop state is empty. Please call Snapshot first.")
         tree_state = self.desktop_state.tree_state
-        if label < 0:
+        if isinstance(label, bool) or not isinstance(label, int):
+            raise IndexError(f"Label {label!r} must be an integer")
+        nodes = [
+            *tree_state.interactive_nodes,
+            *tree_state.scrollable_nodes,
+            *getattr(tree_state, "container_nodes", []),
+        ]
+        if label < 0 or label >= len(nodes):
             raise IndexError(f"Label {label} out of range")
-        if label < len(tree_state.interactive_nodes):
-            element_node = tree_state.interactive_nodes[label]
-        else:
-            scroll_idx = label - len(tree_state.interactive_nodes)
-            if scroll_idx < len(tree_state.scrollable_nodes):
-                element_node = tree_state.scrollable_nodes[scroll_idx]
-            else:
-                raise IndexError(f"Label {label} out of range")
-        return self._label_target(element_node)
+        return nodes[label]
+
+    def get_coordinates_from_label(self, label: int) -> tuple[int, int]:
+        return self._label_target(self.get_node_from_label(label))
 
     @staticmethod
     def _label_target(element_node) -> tuple[int, int]:
@@ -784,25 +827,7 @@ class Desktop:
 
     def get_coordinates_from_labels(self, labels: list[int]) -> list[tuple[int, int]]:
         """Resolve multiple UI element labels to screen coordinates in bulk."""
-        tree_state = self.desktop_state.tree_state
-        interactive_nodes = tree_state.interactive_nodes
-        scrollable_nodes = tree_state.scrollable_nodes
-        interactive_len = len(interactive_nodes)
-
-        results = []
-        for label in labels:
-            if label < 0:
-                raise IndexError(f"Label {label} out of range")
-            if label < interactive_len:
-                element_node = interactive_nodes[label]
-            else:
-                scroll_idx = label - interactive_len
-                if scroll_idx < len(scrollable_nodes):
-                    element_node = scrollable_nodes[scroll_idx]
-                else:
-                    raise IndexError(f"Label {label} out of range")
-            results.append(self._label_target(element_node))
-        return results
+        return [self._label_target(self.get_node_from_label(label)) for label in labels]
 
     @staticmethod
     def _validate_screen_point(x: int, y: int) -> None:
@@ -1767,6 +1792,7 @@ class Desktop:
             bounding_box=clipped_box,
             center=clipped_box.get_center(),
             metadata=node.metadata,
+            element=getattr(node, "element", None),
         )
 
     def _filter_scroll_node_to_region(self, node, region: BoundingBox):
@@ -1780,12 +1806,14 @@ class Desktop:
             bounding_box=clipped_box,
             center=clipped_box.get_center(),
             metadata=node.metadata,
+            element=getattr(node, "element", None),
         )
 
     def _filter_semantic_node_to_region(
         self,
         node: SemanticNode | None,
         region: BoundingBox,
+        source_map: dict[int, object] | None = None,
     ) -> SemanticNode | None:
         if node is None:
             return None
@@ -1798,7 +1826,7 @@ class Desktop:
 
         filtered_children = []
         for child in node.children:
-            filtered_child = self._filter_semantic_node_to_region(child, region)
+            filtered_child = self._filter_semantic_node_to_region(child, region, source_map)
             if filtered_child is not None:
                 filtered_children.append(filtered_child)
 
@@ -1814,21 +1842,34 @@ class Desktop:
             bounding_box=clipped_box,
             metadata=dict(node.metadata),
         )
+        source = getattr(node, "source", None)
+        if source is not None and source_map is not None:
+            filtered_node.source = source_map.get(id(source))
         filtered_node.children = filtered_children
         return filtered_node
 
     def _filter_tree_state_to_region(self, tree_state, region: BoundingBox):
+        source_map: dict[int, object] = {}
         filtered_interactive_nodes = []
         for node in tree_state.interactive_nodes:
             filtered_node = self._filter_tree_node_to_region(node, region)
             if filtered_node is not None:
                 filtered_interactive_nodes.append(filtered_node)
+                source_map[id(node)] = filtered_node
 
         filtered_scrollable_nodes = []
         for node in tree_state.scrollable_nodes:
             filtered_node = self._filter_scroll_node_to_region(node, region)
             if filtered_node is not None:
                 filtered_scrollable_nodes.append(filtered_node)
+                source_map[id(node)] = filtered_node
+
+        filtered_container_nodes = []
+        for node in getattr(tree_state, "container_nodes", []):
+            filtered_node = self._filter_tree_node_to_region(node, region)
+            if filtered_node is not None:
+                filtered_container_nodes.append(filtered_node)
+                source_map[id(node)] = filtered_node
 
         filtered_dom_node = None
         if tree_state.dom_node is not None:
@@ -1837,6 +1878,7 @@ class Desktop:
         filtered_semantic_root = self._filter_semantic_node_to_region(
             tree_state.semantic_tree_root,
             region,
+            source_map,
         )
         if filtered_semantic_root is not None:
             filtered_semantic_root.bounding_box = region
@@ -1860,4 +1902,7 @@ class Desktop:
             semantic_tree_root=filtered_semantic_root,
             truncated=tree_state.truncated,
             element_limit=tree_state.element_limit,
+            container_nodes=filtered_container_nodes,
+            max_depth=getattr(tree_state, "max_depth", None),
+            root_description=getattr(tree_state, "root_description", None),
         )

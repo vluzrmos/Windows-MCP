@@ -113,7 +113,13 @@ def capture_desktop_state(
     vision_mode: str | None = None,
     vision_prompt: str | None = None,
     llm_model: str | None = None,
+    tree_options: dict | None = None,
 ):
+    """Capture the desktop state and render its text parts.
+
+    ``tree_options`` are extra ``Desktop.get_state`` keyword arguments for the UI tree
+    (``max_depth``, ``root_element``, ``only_handles``); they are passed only when set.
+    """
     profile_enabled = _snapshot_profile_enabled()
     profile_started_at = time.perf_counter()
     stage_started_at = profile_started_at
@@ -152,6 +158,7 @@ def capture_desktop_state(
         display_indices=display_indices,
         region=region,
         max_image_size=max_size_resolver,
+        **{key: value for key, value in (tree_options or {}).items() if value is not None},
     )
     if profile_enabled:
         desktop_state_ms = (time.perf_counter() - stage_started_at) * 1000
@@ -374,6 +381,24 @@ def build_snapshot_response(
     {windows}
     ''')
     if include_ui_details:
+        tree_state = getattr(desktop_state, "tree_state", None)
+        snapshot_id = getattr(tree_state, "snapshot_id", None)
+        if snapshot_id:
+            header = (
+                f"Snapshot ID: {snapshot_id} — #N is the label to pass to Click/Type/Scroll/Move/"
+                "ElementAction (optionally with this snapshot_id); labels are verified live "
+                "and only valid for this capture."
+            )
+            root_description = getattr(tree_state, "root_description", None)
+            if root_description:
+                header += f"\nDrill root: {root_description} (labels cover only this region)."
+            max_depth = getattr(tree_state, "max_depth", None)
+            if max_depth is not None:
+                header += (
+                    f"\nDepth limit: {max_depth} semantic level(s); containers marked "
+                    "[+N children not expanded] can be drilled with Snapshot(root_label=#N)."
+                )
+            response_text += "\n" + header
         response_text += dedent(f'''
 
     UI Tree:
