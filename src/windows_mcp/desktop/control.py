@@ -62,6 +62,8 @@ class ControlCoordinator:
         self.mouse_takeover_units = mouse_takeover_units
         self.mouse_takeover_pixels = mouse_takeover_pixels  # Legacy config; no pixel fallback.
         # Set once by the server lifespan before any tools or hooks start.
+        # False: mouse input is not user activity unless the person already holds control.
+        self.mouse_takeover = True
         self.enabled = True
         self.idle_timeout_seconds = 10.0
         self.call_lease_timeout_seconds = 30.0

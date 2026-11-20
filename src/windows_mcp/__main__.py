@@ -376,6 +376,7 @@ def _build_mcp() -> FastMCP:
         # Set thresholds before installing input hooks; invalid TOML was rejected at load.
         controller.mouse_takeover_units = _control_config.mouse_takeover_units
         controller.mouse_takeover_pixels = _control_config.mouse_takeover_pixels
+        controller.mouse_takeover = _control_config.mouse_takeover
         controller.enabled = _control_config.enabled
         controller.policy = _control_config.policy
         controller.idle_timeout_seconds = _control_config.idle_timeout_seconds
@@ -1267,6 +1268,102 @@ def auth(transport: str, host: str, port: int, with_tls: bool, force: bool) -> N
   }}
 }}"""
         )
+
+
+@main.group()
+def sandbox() -> None:
+    """Run windows-mcp inside Windows Sandbox so the agent works apart from your desktop."""
+
+
+@sandbox.command("start")
+@click.option(
+    "--port", default=8765, show_default=True, type=int, help="Server port in the sandbox."
+)
+@click.option("--memory", default=4096, show_default=True, type=int, help="Sandbox memory in MB.")
+@click.option(
+    "--keep-profile",
+    is_flag=True,
+    help="Map a writable browser profile folder (C:\\mcp\\profile) that keeps logins between runs.",
+)
+@click.option(
+    "--headless",
+    is_flag=True,
+    help="Do not open the sandbox window (rendering may stop without one; see docs).",
+)
+@click.option(
+    "--pypi",
+    is_flag=True,
+    help="Use the PyPI release inside the sandbox even when running from a source checkout.",
+)
+@click.option(
+    "--timeout", default=600, show_default=True, type=int, help="Seconds to wait for the server."
+)
+def sandbox_start(
+    port: int, memory: int, keep_profile: bool, headless: bool, pypi: bool, timeout: int
+) -> None:
+    """Start a sandbox, boot windows-mcp in it, and print the client config."""
+    from windows_mcp import sandbox as sb
+
+    layout = sb.SandboxLayout(CONFIG_DIR / "sandbox")
+    key = sb.prepare_layout(layout, keep_profile=keep_profile)
+    source = None if pypi else sb.find_source_checkout()
+    config = sb.build_wsb_config(
+        layout, source=source, port=port, memory_mb=memory, keep_profile=keep_profile
+    )
+    (layout.root / "windows-mcp.wsb").write_text(config, encoding="utf-8")
+
+    try:
+        result = sb.run_wsb("start", "--config", config, "--raw")
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc))
+    if result.returncode != 0:
+        raise click.ClickException(
+            f"wsb start failed:\n{result.stderr.strip() or result.stdout.strip()}"
+        )
+    sandbox_id = sb.parse_sandbox_id(result.stdout)
+    if sandbox_id:
+        layout.id_file.write_text(sandbox_id, encoding="utf-8")
+    click.echo(f"Sandbox started{f' ({sandbox_id})' if sandbox_id else ''}.")
+    click.echo(f"  Source : {source or 'PyPI release'}")
+    click.echo(f"  Shared : {layout.shared}  (C:\\mcp\\shared inside)")
+    click.echo(f"  Logs   : {layout.shared / 'logs'}")
+
+    if not headless and sandbox_id:
+        sb.open_window(sandbox_id)
+
+    click.echo("Waiting for windows-mcp to start in the sandbox (first boot installs uv/Python)...")
+    ready = sb.wait_ready(layout, timeout)
+    if ready is None:
+        raise click.ClickException(f"Timed out after {timeout}s; see {layout.shared / 'logs'}.")
+    if ready.get("status") != "ready":
+        raise click.ClickException(f"Sandbox bootstrap failed: {ready.get('error')}")
+
+    _echo_section("MCP client config (Streamable HTTP)")
+    click.echo(sb.client_config(str(ready["ip"]), int(ready["port"]), key))
+    click.echo("\nStop it with `windows-mcp sandbox stop`.")
+
+
+@sandbox.command("stop")
+def sandbox_stop() -> None:
+    """Stop the sandbox started by `windows-mcp sandbox start`."""
+    from windows_mcp import sandbox as sb
+
+    layout = sb.SandboxLayout(CONFIG_DIR / "sandbox")
+    if not layout.id_file.exists():
+        raise click.ClickException("No sandbox id recorded; use `wsb list` and `wsb stop --id`.")
+    sandbox_id = layout.id_file.read_text(encoding="utf-8").strip()
+    try:
+        result = sb.run_wsb("stop", "--id", sandbox_id)
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc))
+    if result.returncode != 0:
+        raise click.ClickException(
+            f"wsb stop failed:\n{result.stderr.strip() or result.stdout.strip()}"
+        )
+    layout.id_file.unlink(missing_ok=True)
+    layout.ready_file.unlink(missing_ok=True)
+    layout.key_file.unlink(missing_ok=True)
+    click.echo(f"Sandbox {sandbox_id} stopped.")
 
 
 if __name__ == "__main__":

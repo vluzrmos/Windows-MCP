@@ -494,6 +494,50 @@ See [🔐 Security & Access Control](#-security--access-control) for all options
 | `sse` | `serve --transport sse --host HOST --port PORT` | Network-accessible via Server-Sent Events |
 | `streamable-http` | `serve --transport streamable-http --host HOST --port PORT` | Network-accessible via HTTP streaming (recommended for production) |
 
+### Running in Windows Sandbox (work while the agent works)
+
+Windows has one cursor and one keyboard focus per session, so an agent on your own desktop
+always competes with you. Running the server in **Windows Sandbox** gives the agent its own
+session: it clicks and types there while you keep using the host.
+
+Requires Windows 11 24H2+ with the *Windows Sandbox* optional feature (`wsb.exe`).
+
+```shell
+windows-mcp sandbox start            # boots the sandbox, prints the MCP client config
+windows-mcp sandbox start --pypi     # use the PyPI release instead of this checkout
+windows-mcp sandbox start --keep-profile   # keep a browser profile (logins) between runs
+windows-mcp sandbox stop
+```
+
+What happens: the host writes a fresh auth key to `~/.windows-mcp/sandbox/shared`, starts a
+sandbox mapping that folder (`C:\mcp\shared`), a cache for uv/Python/wheels (`C:\mcp\cache`,
+so later boots are fast) and, when run from a source checkout, the checkout read-only
+(`C:\mcp\source`). The logon script `src/windows_mcp/sandbox/bootstrap.ps1` installs uv,
+starts `serve --transport streamable-http` with the key, an IP allowlist for the virtual
+switch subnet, the consent countdown off and mouse takeover off (only the keyboard, e.g.
+`Ctrl+Alt+Shift+Backspace`, takes control back from the agent), then writes `ready.json`. The command prints a
+`type: http` client entry with the sandbox IP and `Authorization: Bearer` header. Logs:
+`~/.windows-mcp/sandbox/shared/logs`.
+
+**Logins, MFA and CAPTCHA.** The sandbox is an ordinary window on your desktop. When the agent
+reaches a sign-in page it should stop and ask you in chat; click into the sandbox window, sign
+in, and tell the agent to continue (it can resume with `WaitFor`). Your input inside the sandbox
+never touches the host. The sandbox is disposable: closing it drops every session and cookie.
+With `--keep-profile`, start the browser with `--user-data-dir=C:\mcp\profile` to keep logins;
+that folder then holds live session cookies on the host, so protect it, and never map your real
+browser profile. Toast notifications from the `Notification` tool show inside the sandbox, not
+on the host.
+
+**Keep the window open.** The sandbox is an RDP-style session: when its window is minimized,
+or with `--headless` and no window, Windows may stop rendering it (black screenshots, input
+fails). Leaving it behind other windows or on another virtual desktop works.
+
+**Other separate sessions.** `bootstrap.ps1` takes `-Shared`, `-Source`, `-Cache`, `-Port` and
+`-Allowlist`, so it also serves as the logon script of a dedicated user in a Hyper-V VM or on a
+Windows Server with RDS. An RDP session to a second user on the *same* Windows 11 Pro/Home PC
+does not work: client editions allow one interactive session, so it signs you out of the
+console (patching `termsrv.dll` to lift that breaks the license and is not supported).
+
 ---
 
 ## 🔐 Security & Access Control
@@ -702,6 +746,12 @@ units, not screen pixels. Devices that do not provide identifiable relative raw
 input, including some touchpads and remote-input devices, must use
 `Ctrl+Alt+Shift+Backspace` to take over. The legacy `mouse_takeover_pixels` setting
 is still accepted for compatibility but no longer affects takeover.
+
+Set `control.mouse_takeover = false` so the mouse never takes control from the AI: a
+bumped or nudged mouse neither pauses the agent nor makes it wait for idle. The keyboard
+still does: `Ctrl+Alt+Shift+Backspace` (or any key) hands you the desktop, and from then on
+the mouse extends your hold as usual. Mouse input during an AI action is still blocked.
+`windows-mcp sandbox start` turns this on inside the sandbox.
 
 ### Desktop gate policies
 

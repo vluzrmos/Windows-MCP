@@ -51,6 +51,8 @@ The codebase follows a layered service architecture under `src/windows_mcp/`:
 
 **Domain services** — thin packages backing the system tools: `filesystem/` (read/write/copy/move/delete/list/search/info), `registry/` (get/set/delete/list, implemented via PowerShell cmdlets), `powershell/` (`PowerShellExecutor` plus environment resolution), `process/` (list/kill), `notifications/`. Registry and PowerShell tools shell out, so their latency is dominated by process startup.
 
+**Sandbox** — `sandbox/`: `windows-mcp sandbox start|stop` builds a Windows Sandbox `.wsb` config, starts it through `wsb.exe`, and waits for `bootstrap.ps1` (the sandbox logon command, shipped as package data) to report `ready.json` in the shared folder `~/.windows-mcp/sandbox/shared`. Lets the agent run in its own session instead of the user's desktop.
+
 **Infrastructure** — `infrastructure/`: cross-cutting concerns. `analytics.py` (optional PostHog telemetry, disabled with `ANONYMIZED_TELEMETRY=false`; records tool names and errors only, never arguments or outputs), `auth.py` and `oauth.py` (bearer-token and OAuth middleware for HTTP transports), `security.py` (SSRF validation, IP allowlist middleware), `config.py` (server configuration), `trace.py` (opt-in local JSONL audit trace middleware). Note `windows_mcp/config.py` at the package root is unrelated — it only holds the `WINDOWS_MCP_DEBUG` helpers.
 
 ## Code Style

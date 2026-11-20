@@ -15,6 +15,11 @@ from windows_mcp.desktop.control_win32 import (
 )
 
 
+def _mouse_counts(owner: Any) -> bool:
+    """Return whether physical mouse input counts as user activity right now."""
+    return getattr(owner, "mouse_takeover", True) or owner._state == "user"
+
+
 def physical_mouse(owner: Any, code: int, wparam: int, lparam: int) -> int:
     """Handle a physical mouse hook callback without waiting on other threads."""
     if code < 0:
@@ -38,6 +43,10 @@ def physical_mouse(owner: Any, code: int, wparam: int, lparam: int) -> int:
         # AI until the raw accumulator confirms a deliberate takeover.
         active = button is not None or point != owner._last_point
         owner._last_point = point
+        # With mouse takeover off, the mouse only counts once the person holds control
+        # (after the hotkey or a key), so a bumped mouse never pauses the AI.
+        if not _mouse_counts(owner):
+            active = False
         if active:
             owner._last_physical_event = time.monotonic()
         if button:
@@ -130,6 +139,8 @@ def raw_input(owner: Any, lparam: int) -> None:
         return  # Null devices can be touchpads; do not infer source.
     if not raw[1] and not raw[2]:
         return  # A zero-delta report is device chatter, not user activity.
+    if not _mouse_counts(owner):
+        return
     owner._last_physical_event = time.monotonic()
     # Preserve arrival time: queue latency must not join separate gestures.
     owner._queue(("raw", *raw, owner._last_physical_event))

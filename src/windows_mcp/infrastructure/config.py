@@ -44,6 +44,9 @@ class ControlConfig:
     # Raw relative device units and hook screen pixels are intentionally separate.
     mouse_takeover_units: int = 500
     mouse_takeover_pixels: int = 500  # Accepted for compatibility; pixel fallback is disabled.
+    # False: mouse input never takes control from the AI (keys and the hotkey still do), so a
+    # bumped mouse cannot stop the agent. Mouse input still extends a takeover already made.
+    mouse_takeover: bool = True
     enabled: bool = True
     idle_timeout_seconds: float = 10.0
     policy: str = "strict"
@@ -200,6 +203,10 @@ def load_config(path: Path | None) -> WindowsMCPConfig:
 
     if "enabled" in control:
         cfg.control.enabled = _strict_bool(control["enabled"], "control.enabled")
+    if "mouse_takeover" in control:
+        cfg.control.mouse_takeover = _strict_bool(
+            control["mouse_takeover"], "control.mouse_takeover"
+        )
     if "idle_timeout_seconds" in control:
         cfg.control.idle_timeout_seconds = validate_idle_timeout(control["idle_timeout_seconds"])
 
@@ -302,6 +309,8 @@ def write_config(cfg: WindowsMCPConfig, path: Path) -> None:
         control_lines.append(f"policy = {_toml_string(ctrl.policy)}")
     if ctrl.enabled != default_ctrl.enabled:
         control_lines.append(f"enabled = {str(ctrl.enabled).lower()}")
+    if ctrl.mouse_takeover != default_ctrl.mouse_takeover:
+        control_lines.append(f"mouse_takeover = {str(ctrl.mouse_takeover).lower()}")
     if ctrl.idle_timeout_seconds != default_ctrl.idle_timeout_seconds:
         control_lines.append(f"idle_timeout_seconds = {ctrl.idle_timeout_seconds}")
     if control_lines:
