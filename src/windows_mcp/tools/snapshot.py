@@ -4,11 +4,12 @@ import logging
 from typing import Literal
 
 from mcp.types import ToolAnnotations
+from windows_mcp.desktop.utils import as_bool as _as_bool
+from windows_mcp.desktop.utils import as_int_list as _as_int_list
 from windows_mcp.infrastructure import with_analytics
 from fastmcp import Context
 
 from windows_mcp.tools._snapshot_helpers import (
-    _as_bool,
     _as_region,
     capture_desktop_state,
     build_snapshot_response,
@@ -74,7 +75,7 @@ def register(mcp, *, get_desktop, get_analytics):
     global state_tool, screenshot_tool
     @mcp.tool(
         name='Snapshot',
-        description="Take a screenshot and inspect the screen. Keywords: screenshot, screen capture, see screen, observe, look, inspect, UI elements, what's on screen. Captures complete desktop state including: system language, focused/opened windows, interactive elements (buttons, text fields, links, menus with coordinates), and scrollable areas. Set use_vision=True to include screenshot/vision analysis. Set vision_mode='winocr' (ultra-fast native Windows OCR returning JSON text + screen coordinates), vision_mode='llm' (local OpenAI-compatible Vision LLM returning JSON/text), vision_mode='winocr+llm' (both), or vision_mode='image' (returns the image directly). When vision_mode is omitted, the server's configured default is used (WINDOWS_MCP_VISION_MODE or [vision] mode in config.toml; 'winocr' when unset), so pass vision_mode='image' explicitly whenever you need to see the actual image. Set resolution='compact' (default: 720p JPEG 95% quality, or 1080p on 4K+) for fast, low-token vision or resolution='normal' (1080p/1440p lossless PNG) when you need fine visual details. Set use_annotation=False to get a clean screenshot without bounding box overlays on UI elements (default: True, draws colored rectangles around detected elements). Set use_ui_tree=False for a faster screenshot-only snapshot when you do not need interactive or scrollable element extraction. Set width_reference_lines/height_reference_lines to overlay a grid for better spatial reasoning (make sure vision is enabled to use it). Set use_dom=True for browser content to get web page elements instead of browser UI. Set display=[0] or display=[0,1] using zero-based active Windows display indices; omit it to keep the default full-desktop behavior. Set region=[left, top, right, bottom] in virtual-desktop pixel coordinates to capture and inspect only that rectangle instead of the whole screen/display — useful when you already know which area matters and want to save tokens; region takes precedence over display when both are given, and an invalid or out-of-bounds region raises an error rather than silently capturing something else. Set save_path to an absolute file path (or an existing directory for a timestamped name) to also write the captured screenshot as a lossless PNG file, whatever vision_mode and resolution are used; this turns on use_vision and the saved path is reported in the response. Existing files are never overwritten. Every labelled element is shown as #N in the UI tree together with a Snapshot ID; pass the label to Click/Type/Scroll/Move/ElementAction. Dense apps: set skeleton=True (or max_depth=N) for a shallow map where cut containers report [+N children not expanded], then drill into one with root_label=#N (plus snapshot_id) to read only that region. Set surface to read just one UI layer: 'menu' (an open popup/context menu), 'dialog', 'focused' (foreground window), 'taskbar', 'system_tray', 'start_menu' or 'action_center'. Always call this first to understand the current desktop state before taking actions.",
+        description="Take a screenshot and inspect the screen. Keywords: screenshot, screen capture, see screen, observe, look, inspect, UI elements, what's on screen. Captures complete desktop state including: system language, focused/opened windows, interactive elements (buttons, text fields, links, menus with coordinates), and scrollable areas. Set use_vision=True to include screenshot/vision analysis. Set vision_mode='winocr' (ultra-fast native Windows OCR returning JSON text + screen coordinates), vision_mode='llm' (local OpenAI-compatible Vision LLM returning JSON/text), vision_mode='winocr+llm' (both), or vision_mode='image' (returns the image directly). When vision_mode is omitted, the server's configured default is used (WINDOWS_MCP_VISION_MODE or [vision] mode in config.toml; 'winocr' when unset), so pass vision_mode='image' explicitly whenever you need to see the actual image. Set resolution='compact' (default: 720p JPEG 95% quality, or 1080p on 4K+) for fast, low-token vision or resolution='normal' (1080p/1440p lossless PNG) when you need fine visual details. Set use_annotation=False to get a clean screenshot without bounding box overlays on UI elements (default: True, draws colored rectangles around detected elements). Set use_ui_tree=False for a faster screenshot-only snapshot when you do not need interactive or scrollable element extraction. Set width_reference_line/height_reference_line to overlay a grid for better spatial reasoning (make sure vision is enabled to use it). Set use_dom=True for browser content to get web page elements instead of browser UI. Set display=[0] or display=[0,1] using zero-based active Windows display indices; omit it to keep the default full-desktop behavior. Set region=[left, top, right, bottom] in virtual-desktop pixel coordinates to capture and inspect only that rectangle instead of the whole screen/display — useful when you already know which area matters and want to save tokens; region takes precedence over display when both are given, and an invalid or out-of-bounds region raises an error rather than silently capturing something else. Set save_path to an absolute file path (or an existing directory for a timestamped name) to also write the captured screenshot as a lossless PNG file, whatever vision_mode and resolution are used; this turns on use_vision and the saved path is reported in the response. Existing files are never overwritten. Every labelled element is shown as #N in the UI tree together with a Snapshot ID; pass the label to Click/Type/Scroll/Move/ElementAction. Dense apps: set skeleton=True (or max_depth=N) for a shallow map where cut containers report [+N children not expanded], then drill into one with root_label=#N (plus snapshot_id) to read only that region. Set surface to read just one UI layer: 'menu' (an open popup/context menu), 'dialog', 'focused' (foreground window), 'taskbar', 'system_tray', 'start_menu' or 'action_center'. Always call this first to understand the current desktop state before taking actions.",
         annotations=ToolAnnotations(
             title="Snapshot",
             readOnlyHint=True,
@@ -82,6 +83,10 @@ def register(mcp, *, get_desktop, get_analytics):
             idempotentHint=True,
             openWorldHint=False,
         ),
+        # A UI tree can pass 50,000 characters, where Claude Code saves a tool result
+        # to a file instead of showing it. Element ids are only useful inline. 100,000
+        # characters stays near Claude Code's default 25,000-token output cap.
+        meta={"anthropic/maxResultSizeChars": 100_000},
     )
     @with_analytics(get_analytics(), "State-Tool", run_sync_in_thread=False)
     def _state_tool(
@@ -95,7 +100,7 @@ def register(mcp, *, get_desktop, get_analytics):
         llm_model: str | None = None,
         width_reference_line: int | None = None,
         height_reference_line: int | None = None,
-        display: list[int] | None = None,
+        display: list[int] | str | None = None,
         region: list[int] | str | None = None,
         save_path: str | None = None,
         max_depth: int | None = None,
@@ -108,7 +113,7 @@ def register(mcp, *, get_desktop, get_analytics):
         tree_options = _tree_options(
             get_desktop(),
             max_depth=max_depth,
-            skeleton=_as_bool(skeleton),
+            skeleton=_as_bool(skeleton, "skeleton"),
             root_label=root_label,
             snapshot_id=snapshot_id,
             surface=surface,
@@ -116,13 +121,13 @@ def register(mcp, *, get_desktop, get_analytics):
         try:
             capture_result = capture_desktop_state(
                 get_desktop(),
-                use_vision=_as_bool(use_vision) or bool(save_path),
-                use_dom=_as_bool(use_dom),
-                use_annotation=_as_bool(use_annotation),
-                use_ui_tree=_as_bool(use_ui_tree),
+                use_vision=_as_bool(use_vision, "use_vision") or bool(save_path),
+                use_dom=_as_bool(use_dom, "use_dom"),
+                use_annotation=_as_bool(use_annotation, "use_annotation"),
+                use_ui_tree=_as_bool(use_ui_tree, "use_ui_tree"),
                 width_reference_line=width_reference_line,
                 height_reference_line=height_reference_line,
-                display=display,
+                display=_as_int_list(display, "display"),
                 region=_as_region(region),
                 tool_name="Snapshot tool",
                 resolution=resolution,
@@ -161,7 +166,7 @@ def register(mcp, *, get_desktop, get_analytics):
 
     @mcp.tool(
         name='Screenshot',
-        description="Captures a fast screenshot-first desktop snapshot with cursor position, desktop/window summaries, and an image or local vision JSON output depending on vision_mode. This path skips UI tree extraction for speed. Use Snapshot when you need interactive element ids, scrollable regions, or browser DOM extraction. Set vision_mode='winocr' (ultra-fast native Windows OCR returning JSON text + screen coordinates in ~100ms), vision_mode='llm' (local OpenAI-compatible Vision LLM returning JSON/text), vision_mode='winocr+llm' (both), or vision_mode='image' (returns the image directly). When vision_mode is omitted, the server's configured default is used (WINDOWS_MCP_VISION_MODE or [vision] mode in config.toml; 'winocr' when unset), so pass vision_mode='image' explicitly whenever you need to see the actual image. Set resolution='compact' (default: 720p JPEG 95% quality, or 1080p on 4K+) for fast, low-token vision or resolution='normal' (1080p/1440p lossless PNG) when you need fine visual details. Set display=[0] or display=[0,1] using zero-based active Windows display indices to capture only those monitors. Set region=[left, top, right, bottom] in virtual-desktop pixel coordinates to capture only that rectangle instead of the whole screen/display — useful when you already know which area matters and want to save tokens; region takes precedence over display when both are given, and an invalid or out-of-bounds region raises an error rather than silently capturing something else. Set save_path to an absolute file path (or an existing directory for a timestamped name) to also write the captured screenshot as a lossless PNG file, whatever vision_mode and resolution are used; the saved path is reported in the response and existing files are never overwritten. Note: the returned image may be downscaled for efficiency; when it is, multiply image coordinates by the ratio of original size to displayed size to get the actual screen coordinates for mouse actions (Click, Move, etc.).",
+        description="Captures a fast screenshot-first desktop snapshot with cursor position, desktop/window summaries, and an image or local vision JSON output depending on vision_mode. This path skips UI tree extraction for speed. Use Snapshot when you need interactive element ids, scrollable regions, or browser DOM extraction. Set vision_mode='winocr' (ultra-fast native Windows OCR returning JSON text + screen coordinates in ~100ms), vision_mode='llm' (local OpenAI-compatible Vision LLM returning JSON/text), vision_mode='winocr+llm' (both), or vision_mode='image' (returns the image directly). When vision_mode is omitted, the server's configured default is used (WINDOWS_MCP_VISION_MODE or [vision] mode in config.toml; 'winocr' when unset), so pass vision_mode='image' explicitly whenever you need to see the actual image. Set resolution='compact' (default: 720p JPEG 95% quality, or 1080p on 4K+) for fast, low-token vision or resolution='normal' (1080p/1440p lossless PNG) when you need fine visual details. Set display=[0] or display=[0,1] using zero-based active Windows display indices to capture only those monitors. Set region=[left, top, right, bottom] in virtual-desktop pixel coordinates to capture only that rectangle instead of the whole screen/display — useful when you already know which area matters and want to save tokens; region takes precedence over display when both are given, and an invalid or out-of-bounds region raises an error rather than silently capturing something else. Set save_path to an absolute file path (or an existing directory for a timestamped name) to also write the captured screenshot as a lossless PNG file, whatever vision_mode and resolution are used; the saved path is reported in the response and existing files are never overwritten. Note: the returned image may be downscaled for efficiency, and it starts at the top-left corner of the captured area, not necessarily at screen (0, 0). To get the screen coordinates for mouse actions (Click, Move, etc.), multiply image coordinates by the ratio of original size to displayed size, then add the screen coordinate of image pixel (0, 0) when the response gives one.",
         annotations=ToolAnnotations(
             title="Screenshot",
             readOnlyHint=True,
@@ -179,7 +184,7 @@ def register(mcp, *, get_desktop, get_analytics):
         llm_model: str | None = None,
         width_reference_line: int | None = None,
         height_reference_line: int | None = None,
-        display: list[int] | None = None,
+        display: list[int] | str | None = None,
         region: list[int] | str | None = None,
         save_path: str | None = None,
         ctx: Context = None,
@@ -189,11 +194,11 @@ def register(mcp, *, get_desktop, get_analytics):
                 get_desktop(),
                 use_vision=True,
                 use_dom=False,
-                use_annotation=_as_bool(use_annotation),
+                use_annotation=_as_bool(use_annotation, "use_annotation"),
                 use_ui_tree=False,
                 width_reference_line=width_reference_line,
                 height_reference_line=height_reference_line,
-                display=display,
+                display=_as_int_list(display, "display"),
                 region=_as_region(region),
                 tool_name="Screenshot tool",
                 resolution=resolution,

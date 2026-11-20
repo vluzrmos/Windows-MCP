@@ -1,3 +1,4 @@
+import io
 import asyncio
 from unittest.mock import MagicMock, patch
 
@@ -48,6 +49,13 @@ class TestParseDisplaySelection:
             Desktop.parse_display_selection([-1])
         with pytest.raises(ValueError):
             Desktop.parse_display_selection(["a"])
+
+    @pytest.mark.parametrize("value", [True, False, [True], [False], [0, True], [1, False]])
+    def test_rejects_booleans_as_display_indices(self, value):
+        # bool is an int subclass, so an unwrapped list element would otherwise
+        # be accepted as display index 1/0 -- as bare booleans already are not.
+        with pytest.raises(ValueError, match="zero-based active display indices"):
+            Desktop.parse_display_selection(value)
 
 
 class TestParseRegionSelection:
@@ -327,7 +335,7 @@ class TestDisplayFiltering:
             output_idx=1,
             processor_backend="numpy",
         )
-        fake_camera.grab.assert_called_once_with(region=None, copy=True, new_frame_only=False)
+        fake_camera.grab.assert_called_once_with(copy=True, new_frame_only=True)
         mock_fromarray.assert_called_once()
 
     def test_get_screenshot_falls_back_to_pillow_when_dxcam_region_is_unsupported(
@@ -732,7 +740,7 @@ class TestSnapshotTools:
         fake_desktop.get_state.return_value = desktop_state
         monkeypatch.setattr(main_module, "desktop", fake_desktop)
 
-        result = asyncio.run(main_module.state_tool(use_vision=True, display=[1]))
+        result = asyncio.run(main_module.state_tool(use_vision=True, display=[1], vision_mode="image"))
 
         assert len(result) == 2
         call = fake_desktop.get_state.call_args.kwargs
@@ -767,7 +775,7 @@ class TestSnapshotTools:
         fake_desktop.get_state.return_value = desktop_state
         monkeypatch.setattr(main_module, "desktop", fake_desktop)
 
-        result = asyncio.run(main_module.screenshot_tool(display=[1]))
+        result = asyncio.run(main_module.screenshot_tool(display=[1], vision_mode="image"))
 
         assert len(result) == 2
         assert "UI Tree: Skipped for fast screenshot-only capture." in result[0]
@@ -816,3 +824,27 @@ class TestSnapshotTools:
         result = asyncio.run(main_module.screenshot_tool(save_path="relative.png"))
 
         assert result[0].startswith("Error saving screenshot:")
+
+    @pytest.mark.parametrize("tool_name", ["screenshot_tool", "state_tool"])
+    def test_tools_drop_the_full_image_once_it_is_encoded(
+        self, desktop_state, monkeypatch, tmp_path, tool_name
+    ):
+        # The Desktop keeps its last state between calls; holding the PIL image there
+        # kept a full-resolution copy of the screen alive for the life of the server.
+        desktop_state.screenshot.putpixel((3, 4), (10, 20, 30))
+        fake_desktop = MagicMock()
+        fake_desktop.get_state.return_value = desktop_state
+        monkeypatch.setattr(main_module, "desktop", fake_desktop)
+        target = tmp_path / "shot.png"
+
+        tool = getattr(main_module, tool_name)
+        # This fork defaults to winocr text and a compact JPEG: ask for the lossless image.
+        result = asyncio.run(
+            tool(save_path=str(target), vision_mode="image", resolution="normal")
+        )
+
+        assert desktop_state.screenshot is None
+        returned = Image.open(io.BytesIO(result[-1].data))
+        assert returned.size == (640, 480)
+        assert returned.convert("RGB").getpixel((3, 4)) == (10, 20, 30)
+        assert Image.open(target).convert("RGB").getpixel((3, 4)) == (10, 20, 30)

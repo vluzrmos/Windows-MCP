@@ -4,21 +4,29 @@ from typing import Literal
 from mcp.types import ToolAnnotations
 
 from windows_mcp.desktop.control import get_controller
+from windows_mcp.infrastructure.thread_affinity import uia_worker_status
 
 
 def register(mcp, *, get_desktop, get_analytics):
     @mcp.tool(
         name="ControlStatus",
-        description="Get desktop control owner, enabled state, gate policy, configured idle timeout and remaining user idle wait in seconds, or pass action='release' to immediately release AI desktop control and hide the HUD overlay before finishing a response.",
+        description="Get desktop control owner, enabled state, gate policy, configured idle timeout and remaining user idle wait in seconds. AI control has no time limit: it lasts until the user takes over or release=true (or action='release') hands the desktop back and hides the HUD overlay, so release when the desktop work is done or before finishing a response. Settings are read-only and changes require a server restart.",
         annotations=ToolAnnotations(
             title="ControlStatus",
-            readOnlyHint=True,
+            readOnlyHint=False,
             destructiveHint=False,
             idempotentHint=True,
             openWorldHint=False,
         ),
     )
-    def control_status_tool(action: Literal["status", "release"] = "status") -> dict:
-        if action == "release":
-            return get_controller().release()
-        return get_controller().status()
+    def control_status_tool(
+        release: bool = False, action: Literal["status", "release"] = "status"
+    ) -> dict:
+        controller = get_controller()
+        status = controller.release() if release or action == "release" else controller.status()
+        worker = uia_worker_status()
+        return {
+            **status,
+            "ui_busy": worker["busy"],
+            "uia_worker": worker,
+        }

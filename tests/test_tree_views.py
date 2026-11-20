@@ -7,6 +7,7 @@ from windows_mcp.tree.views import (
     SemanticNode,
     TreeElementNode,
     TreeState,
+    _node_meta_str,
 )
 
 
@@ -195,3 +196,112 @@ class TestTreeElementNode:
         assert target.metadata["has_focused"] is True
         assert target.bounding_box is sample_tree_element_node.bounding_box
         assert target.center is sample_tree_element_node.center
+
+
+def _render_edit(metadata: dict) -> str:
+    """Render a desktop > window > edit semantic tree whose edit carries `metadata`."""
+    root = SemanticNode(control_type="Desktop", element_type="desktop", name="Desktop")
+    window = SemanticNode(control_type="Window", element_type="window", name="Notepad")
+    root.add_child(window)
+    window.add_child(
+        SemanticNode(
+            control_type="Edit",
+            element_type="interactive",
+            name="Search",
+            window_name="Notepad",
+            center=Center(x=210, y=40),
+            metadata=metadata,
+        )
+    )
+    return TreeState(semantic_tree_root=root).semantic_tree_to_string()
+
+
+class TestSelectionMetadata:
+    """tree_traversal stores a real text selection in the node metadata; it must be shown."""
+
+    def test_partial_selection_is_shown_after_the_value(self):
+        metadata = {"has_focused": True, "value": "hello world", "selected_text": "wor"}
+
+        assert _node_meta_str(metadata) == '  [focused]  [value:"hello world"]  [selected:"wor"]'
+
+    def test_whole_document_selection_reads_all_instead_of_the_text(self):
+        metadata = {"value": "hello world", "selected_text": "hello world", "all_selected": True}
+
+        assert _node_meta_str(metadata) == '  [value:"hello world"]  [selected:all]'
+
+    def test_long_selection_is_cut_to_a_preview(self):
+        assert _node_meta_str({"selected_text": "x" * 100}) == '  [selected:"' + "x" * 100 + '"]'
+        assert _node_meta_str({"selected_text": "x" * 101}) == '  [selected:"' + "x" * 100 + '..."]'
+
+    def test_selection_is_shown_in_the_semantic_tree(self):
+        result = _render_edit({"has_focused": True, "value": "hello world", "selected_text": "wor"})
+
+        assert result.splitlines()[-1].endswith(
+            '(210,40) edit "Search"  [action: fill]  [focused]  [value:"hello world"]  '
+            '[selected:"wor"]'
+        )
+
+    def test_multiline_selection_stays_on_one_tree_line(self):
+        result = _render_edit({"selected_text": "one\r\ntwo\rthree\nfour"})
+
+        lines = result.splitlines()
+        assert len(lines) == 3
+        assert lines[-1].endswith(r'[selected:"one\r\ntwo\rthree\nfour"]')
+
+
+class TestSelectedItemMetadata:
+    """tree_traversal flags the selected radio button, tab or list/tree item with is_selected."""
+
+    def test_selected_item_is_flagged(self):
+        metadata = {"has_focused": True, "is_selected": True}
+
+        assert _node_meta_str(metadata) == "  [focused]  [selected]"
+
+    def test_unselected_item_adds_nothing(self):
+        assert _node_meta_str({"has_focused": False, "is_selected": False}) == ""
+
+
+class TestLineBreaks:
+    """A name or value can span lines; the UI tree must still give each element one line."""
+
+    def test_multiline_value_stays_on_its_element_line(self):
+        result = _render_edit({"value": "one\r\ntwo\rthree\nfour"})
+
+        lines = result.splitlines()
+        assert len(lines) == 3
+        assert lines[-1].endswith(r'[value:"one\r\ntwo\rthree\nfour"]')
+
+    def test_multiline_names_stay_on_their_element_lines(self):
+        name = "one\r\ntwo\rthree\nfour"
+        root = SemanticNode(control_type="Desktop", element_type="desktop", name="Desktop")
+        window = SemanticNode(control_type="Window", element_type="window", name=name)
+        group = SemanticNode(control_type="Group", element_type="structural", name=name)
+        group.add_child(
+            SemanticNode(
+                control_type="Button",
+                element_type="interactive",
+                name=name,
+                center=Center(x=210, y=40),
+            )
+        )
+        root.add_child(window)
+        window.add_child(group)
+        window.add_child(
+            SemanticNode(
+                control_type="Pane",
+                element_type="scrollable",
+                name=name,
+                center=Center(x=300, y=200),
+            )
+        )
+        window.add_child(SemanticNode(control_type="Text", element_type="informative", name=name))
+
+        lines = TreeState(semantic_tree_root=root).semantic_tree_to_string().splitlines()
+
+        escaped = r"one\r\ntwo\rthree\nfour"
+        assert len(lines) == 6
+        assert lines[1].endswith(f'window "{escaped}"')
+        assert lines[2].endswith(f'group "{escaped}"')
+        assert lines[3].endswith(f'(210,40) button "{escaped}"  [action: click]')
+        assert lines[4].endswith(f'(300,200) pane "{escaped}"  [action: click]')
+        assert lines[5].endswith(f'text "{escaped}"')

@@ -20,6 +20,22 @@ def _action_for(control_type: str) -> str:
     return _ACTION_MAP.get(control_type.lower(), "click")
 
 
+def _escape_line_breaks(text: str) -> str:
+    return text.replace("\r", "\\r").replace("\n", "\\n")
+
+
+# Same preview length as the Clipboard tool's confirmation. The walk stores the whole
+# selection, so without a cap a long one would be printed into the tree in full.
+_SELECTION_PREVIEW_CHARS = 100
+
+
+def _selection_preview(text: str) -> str:
+    if len(text) > _SELECTION_PREVIEW_CHARS:
+        text = text[:_SELECTION_PREVIEW_CHARS] + "..."
+    # A selection can span lines; escape the breaks so it stays on its element's tree line.
+    return _escape_line_breaks(text)
+
+
 def _node_meta_str(metadata: dict[str, Any]) -> str:
     parts = []
     if metadata.get("has_focused"):
@@ -37,6 +53,18 @@ def _node_meta_str(metadata: dict[str, Any]) -> str:
     minimum, maximum = metadata.get("min"), metadata.get("max")
     if minimum is not None and maximum is not None:
         parts.append(f"range:{minimum}-{maximum}")
+    # The walk records a text selection only when something is really selected, never a
+    # bare caret. Showing it lets an agent check what Ctrl+A or a Shift+arrow selection
+    # covers before typing over it; a whole-document selection reads as "all".
+    selected_text = metadata.get("selected_text")
+    if metadata.get("all_selected"):
+        parts.append("selected:all")
+    elif selected_text:
+        parts.append(f'selected:"{_selection_preview(selected_text)}"')
+    # The chosen radio button, tab or list/tree item; without the flag it reads exactly
+    # like the options next to it.
+    if metadata.get("is_selected"):
+        parts.append("selected")
     toggle = metadata.get("toggle_state")
     if toggle:
         parts.append(f"toggle:{toggle}")
@@ -159,7 +187,9 @@ def _render_semantic_node(node: SemanticNode, lines: list[str], prefix: str, is_
         lines.append("desktop")
     else:
         connector = "└── " if is_last else "├── "
-        lines.append(f"{prefix}{connector}{_format_semantic_node(node)}")
+        # A name or value can span lines too (a multi-line field's text, say); escape the
+        # breaks so each element keeps one tree line.
+        lines.append(f"{prefix}{connector}{_escape_line_breaks(_format_semantic_node(node))}")
 
     if not node.children:
         return

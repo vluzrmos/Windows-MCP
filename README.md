@@ -382,7 +382,7 @@ args=[
 <details>
   <summary>Install in Claude Code</summary>
 
-  1. Install [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview):
+  1. Install [Claude Code](https://code.claude.com/docs/en/setup):
 
 ```shell
 npm install -g @anthropic-ai/claude-code
@@ -422,6 +422,20 @@ npm install -g @anthropic-ai/claude-code
   ```
 
   To verify the server is registered, run `claude mcp list`. Inside Claude Code, use `/mcp` to check server status.
+
+  **Startup timeout.** Claude Code waits 30 seconds for an MCP server to start (`MCP_TIMEOUT`). The first `uvx` launch downloads and installs dependencies, and on a busy or antivirus-scanned machine even a warm start can take 15-30 seconds, so the server may show as failed in `/mcp`. Either pre-install it with `uv tool install windows-mcp` and register `windows-mcp.exe serve`, or raise the timeout before starting Claude Code:
+
+  ```powershell
+  $env:MCP_TIMEOUT = "120000"; claude
+  ```
+
+  **Environment variables.** Pass settings with `--env`, for example to turn off telemetry:
+
+  ```shell
+  claude mcp add --transport stdio --env ANONYMIZED_TELEMETRY=false windows-mcp -- uvx windows-mcp serve
+  ```
+
+  **Large results.** Claude Code warns when a tool result passes 10,000 tokens and caps it at 25,000 (`MAX_MCP_OUTPUT_TOKENS`); text over 50,000 characters is saved to a file instead, except `Snapshot`, which allows up to 100,000 characters inline. Prefer `Screenshot` over `Snapshot` when you only need to see the screen, pass `region` or `display` to capture less, and lower `WINDOWS_MCP_MAX_TREE_ELEMENTS` if UI trees are too large.
 
   **WSL (Windows Subsystem for Linux)**
 
@@ -515,6 +529,8 @@ All tools are enabled by default. Use `--tools` to whitelist specific tools, or 
 windows-mcp serve --tools "Screenshot,Click,Snapshot"   # Enable only these tools
 windows-mcp serve --exclude-tools "PowerShell,Registry" # Disable specific tools
 ```
+
+Tool names are not case-sensitive. A name that matches no tool stops the server with an error that lists the tool names.
 
 ### TLS/HTTPS
 ```shell
@@ -636,6 +652,7 @@ Configure it in `~/.windows-mcp/config.toml` (or disable it entirely with `enabl
 enabled = true
 policy = "relaxed"
 idle_timeout_seconds = 10.0
+consent_countdown_seconds = 10
 ```
 
 Or override it for one MCP server launch:
@@ -662,6 +679,19 @@ own input; PowerShell scripts can also operate the UI. The separate screenshot f
 setting is unchanged. When control is enabled, the idle timer restarts with physical
 input, so shortening it does not allow gated calls while you keep using the computer.
 
+Before AI starts a new control period, the screen edges turn amber and a dialog
+counts down from `consent_countdown_seconds`. **Allow now** starts control at once,
+and input in the first second after it (your hand leaving the mouse) does not take the
+desktop back; the takeover hotkey still does. **Deny** (or closing the dialog) rejects the call with `CONTROL_DENIED`, and an
+unanswered countdown starts control, so unattended runs keep working. If you use the
+mouse or keyboard during the countdown without answering, you stay in control and the
+call returns `USER_CONTROL`. Consent lasts until you take the desktop back; later AI
+calls do not ask again, even after the agent releases control. The prompt also appears while you
+are using the computer, instead of a silent `USER_CONTROL`. After you deny, ignore it
+while working, or take the desktop back from AI, calls return `USER_CONTROL` without
+asking until you have been idle for `idle_timeout_seconds`. Set
+`consent_countdown_seconds = 0` (0–60) to start control without asking.
+
 During AI control, small mouse movements remain blocked without pausing the current
 tool. Mouse takeover adds up the length of each relative raw-input movement,
 including back-and-forth movement, until it reaches 500 device units by default.
@@ -686,7 +716,7 @@ Process `list`, and Clipboard `get` bypass ownership in A and B. This classifica
 concerns desktop interference, not permissions or data safety. PowerShell can still
 operate the UI, and file/registry operations can have other side effects.
 
-Ungated calls do not acquire or extend the desktop lease, activate its indicator,
+Ungated calls do not acquire the desktop lease, activate its indicator,
 or wait for its tool lock. Existing resource constraints still apply: UI Automation
 operations share a dedicated worker, so a long WaitFor can delay other UIA work.
 The separate screenshot flash is unchanged. `--no-control` retains its existing
@@ -702,6 +732,15 @@ For contributors: tool categories and the few mode-specific exceptions live in
 `src/windows_mcp/tools/control_policy.py`. Update that table when adding tools or modes;
 registration coverage tests detect omissions. Unknown extensions conservatively
 use the gate. Keep policy decisions out of individual tool implementations.
+
+### Cursor positioning failures
+
+If Windows rejects `SetCursorPos`, input tools return an error instead of reporting
+success or continuing with a click or text entry at the wrong location. Check that
+the server can access the active input desktop and whether the target application
+is running with higher privileges. The error includes the Windows error code when
+available; some failures provide no extended error code. These checks are diagnostic
+suggestions, not a determination of the cause. Windows-MCP does not elevate itself.
 
 ### `auth` Helper
 
@@ -734,6 +773,7 @@ All variables are optional unless noted. Set them via the `env` key in `claude_d
 |---|---|---|
 | `WINDOWS_MCP_SCREENSHOT_SCALE` | `1.0` | Scale factor applied to screenshots before encoding. Accepts a float in the range `0.1`–`1.0`. Useful on high-resolution displays (1440p, 4K) where the default produces images that exceed Claude Desktop's 1 MB tool-result limit. Set to `0.5` to halve both dimensions (quarter the file size). |
 | `WINDOWS_MCP_SCREENSHOT_BACKEND` | `auto` | Screenshot capture backend. Accepted values: `auto` (tries dxcam → mss → pillow in order), `dxcam`, `mss`, `pillow`. Use `mss` or `pillow` if `dxcam` is unavailable or causes issues on your GPU. |
+| `WINDOWS_MCP_DXCAM_IDLE_SECONDS` | `30` | Seconds the `dxcam` backend keeps a display's capture camera and its last frame (6–25 MB per display) after the most recent screenshot on it. Back-to-back screenshots within this window reuse the camera; after it, both are released and the next capture pays a one-off ~0.1 s setup. Unset or blank uses the default silently. A non-number, `nan`/`inf`, or a value `<= 0` logs a warning and uses the default. A value above the platform timer maximum (about 49.7 days) is clamped to it with a warning. Read once at startup. |
 | `WINDOWS_MCP_PROFILE_SNAPSHOT` | _(disabled)_ | Set to `1`, `true`, `yes`, or `on` to emit per-stage timing logs for Screenshot/Snapshot calls. Useful for diagnosing slow captures. |
 | `WINDOWS_MCP_DISABLE_FLASH` | _(disabled)_ | Set to `1`, `true`, `yes`, or `on` to suppress the orange-red glowing border that briefly highlights the captured area after every screenshot. The flash is rendered on a transparent always-on-top window *after* capture so it never appears in the captured image. |
 | `WINDOWS_MCP_HUMAN_MOUSE` | _(disabled)_ | Set to `1`, `true`, `yes`, or `on` to make mouse input look human: the cursor glides along a slightly curved path with non-linear speed (and the occasional overshoot-and-correct) instead of jumping, pauses briefly before clicking, varies how long buttons are held, and clicks a random point inside labelled elements instead of their exact center. Drag-and-drop gets the same treatment. Adds roughly 0.2–0.8 s per mouse action. |
@@ -745,7 +785,7 @@ All variables are optional unless noted. Set them via the `env` key in `claude_d
 
 | Variable | Default | Description |
 |---|---|---|
-| `WINDOWS_MCP_EXCLUDE_PROCESSES` | _(none)_ | Comma-separated process basenames whose windows are excluded from UI Automation tree traversal, e.g. `Code.exe,Cursor.exe`. Matching is case-insensitive and exact — no wildcards or regular expressions. Unset or empty preserves current behaviour. |
+| `WINDOWS_MCP_EXCLUDE_PROCESSES` | _(none)_ | Comma-separated process basenames whose windows are excluded from UI Automation window metadata and tree traversal, e.g. `Code.exe,Cursor.exe`. Matching is case-insensitive and exact — no wildcards or regular expressions. Unset or empty preserves current behaviour. |
 
 Some applications expose accessibility trees that can become slow or unresponsive during UI Automation traversal. `Snapshot` and `WaitFor` may traverse the active window and other top-level handles selected for tree capture, so one pathological accessibility provider can stall the capture.
 
@@ -757,7 +797,7 @@ WINDOWS_MCP_EXCLUDE_PROCESSES=Code.exe,Cursor.exe
 
 Process names are comma-separated executable basenames. They are matched case-insensitively after surrounding whitespace is stripped; empty entries are ignored and duplicates are harmless.
 
-A window is excluded *before* any UI Automation call is made against it, so its accessibility provider is never entered. Excluded applications may still appear in the window list, but Windows-MCP will not traverse their accessibility trees, and they are not reported as failed captures. If the owning process of a window cannot be resolved, the window is traversed as usual.
+A window is excluded *before* any UI Automation call is made against it, so its accessibility provider is never entered during Snapshot collection. Excluded windows are omitted from the window list and active-window metadata as well as the accessibility tree, and they are not reported as failed captures. If the foreground window belongs to an excluded process, no active window is reported. If the owning process of a window cannot be resolved, the window is queried and traversed as usual.
 
 This is an exclusion mechanism — a mitigation, not a complete fix for every form of [#383](https://github.com/CursorTouch/Windows-MCP/issues/383). It only skips the processes you name; a pathological window you have not listed can still stall a capture.
 
@@ -907,7 +947,7 @@ MCP Client can access the following tools to interact with Windows:
   `dialog_open`/`dialog_closed`, `process_started`/`process_exited`, and for one label
   `element_value`, `element_actionable`, `element_stale`. A timeout reports what was last
   observed.
-- `ControlStatus`: Read the desktop control owner and remaining user-idle wait. It stays available when user takeover blocks new tool calls. During AI control, a visible edge and cursor glow indicate ownership; moving the physical mouse substantially or pressing `Ctrl+Alt+Shift+Backspace` returns control to the user until 10 seconds of inactivity. During screenshot capture, the indicator is temporarily hidden and physical input is released; any physical input during this interval preempts AI control, although `ControlStatus` can briefly still report `ai` until that event is processed. Stepwise desktop input stops at its next checkpoint, but an already-running external command (for example `PowerShell` or an `App` launch) may continue after takeover; this control gate does not cancel processes or undo completed side effects. On a detected hook fault, injected keys and mouse buttons are released asynchronously, so physical input can briefly overlap a still-held AI key or button. Windows may also silently remove a low-level hook without notifying this process; periodic hook replacement reduces but does not eliminate that undetected window. User takeover is therefore best-effort, not a security boundary or a guarantee of exclusive control.
+- `ControlStatus`: Read the desktop control owner and remaining user-idle wait; `release=true` (or `action="release"`) ends AI control and hides the HUD overlay. It stays available when user takeover blocks new tool calls. AI control has no time limit: once a gated call takes the desktop, it stays with AI between calls until the agent releases it, the user takes over, or the server stops. During AI control, a visible edge and a cursor glow tagged `AI` indicate ownership, and each AI click shows a brief expanding ring at the click point; moving the physical mouse substantially or pressing `Ctrl+Alt+Shift+Backspace` returns control to the user until 10 seconds of inactivity. During screenshot capture, the indicator is temporarily hidden and physical input is released; any physical input during this interval preempts AI control, although `ControlStatus` can briefly still report `ai` until that event is processed. Stepwise desktop input stops at its next checkpoint, but an already-running external command (for example `PowerShell` or an `App` launch) may continue after takeover; this control gate does not cancel processes or undo completed side effects. On a detected hook fault, injected keys and mouse buttons are released asynchronously, so physical input can briefly overlap a still-held AI key or button. Windows may also silently remove a low-level hook without notifying this process; periodic hook replacement reduces but does not eliminate that undetected window. User takeover is therefore best-effort, not a security boundary or a guarantee of exclusive control.
   Sessionless MCP 2026-07-28 clients cannot receive unsolicited control-state logs; they should query `ControlStatus` when they need the current owner.
 - `DisplayInventory`: Read display layout, work areas, effective DPI, and scale metadata.
 - `Screenshot`: Fast screenshot-first desktop capture with cursor position, active/open windows, and an image. Skips UI tree extraction for speed and should be the default first call when you mainly need visual context. Supports `display=[0]` or `display=[0,1]` using zero-based active Windows display indices, and `region=[left, top, right, bottom]` (virtual-desktop pixel coordinates) to capture just that rectangle instead of the whole screen — cheaper on tokens when you already know which area matters. `region` takes precedence over `display` when both are given; an invalid or out-of-bounds region raises an error. After capture, a brief orange-red glowing border is drawn inside the captured area as a visual confirmation (set `WINDOWS_MCP_DISABLE_FLASH=1` to disable).

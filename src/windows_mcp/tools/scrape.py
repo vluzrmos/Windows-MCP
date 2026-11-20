@@ -3,6 +3,7 @@
 import asyncio
 
 from mcp.types import ToolAnnotations
+from windows_mcp.desktop.utils import as_bool
 from windows_mcp.infrastructure import run_uia_affine, with_analytics
 from fastmcp import Context
 
@@ -29,13 +30,9 @@ def register(mcp, *, get_desktop, get_analytics):
         ctx: Context = None,
     ) -> str:
         desktop = get_desktop()
-        use_dom = use_dom is True or (isinstance(use_dom, str) and use_dom.lower() == "true")
-        full_page = full_page is True or (
-            isinstance(full_page, str) and full_page.lower() == "true"
-        )
-        use_sampling = use_sampling is True or (
-            isinstance(use_sampling, str) and use_sampling.lower() == "true"
-        )
+        use_dom = as_bool(use_dom, "use_dom")
+        full_page = as_bool(full_page, "full_page")
+        use_sampling = as_bool(use_sampling, "use_sampling")
 
         if not use_dom:
             # The fetch can take seconds and needs no UIA: run it on a generic worker
@@ -57,14 +54,19 @@ def register(mcp, *, get_desktop, get_analytics):
             if not tree_state.dom_node:
                 return f"No DOM information found. Please open {url} in browser first."
             dom_node = tree_state.dom_node
-            vertical_scroll_percent = dom_node.metadata.get("vertical_scroll_percent", 0)
             content = "\n".join([node.text for node in tree_state.dom_informative_nodes])
-            header_status = (
-                "Reached top" if vertical_scroll_percent <= 0 else "Scroll up to see more"
-            )
-            footer_status = (
-                "Reached bottom" if vertical_scroll_percent >= 100 else "Scroll down to see more"
-            )
+            if dom_node.metadata.get("vertical_scrollable") is False:
+                # The page does not scroll, so this text is all of it. The percent is
+                # 0 here, which used to end the content with "Scroll down to see more".
+                header_status, footer_status = "Reached top", "Reached bottom"
+            else:
+                vertical_scroll_percent = dom_node.metadata.get("vertical_scroll_percent", 0)
+                header_status = (
+                    "Reached top" if vertical_scroll_percent <= 0 else "Scroll up to see more"
+                )
+                footer_status = (
+                    "Reached bottom" if vertical_scroll_percent >= 100 else "Scroll down to see more"
+                )
             content = f"{header_status}\n{content}\n{footer_status}"
 
         if use_sampling and ctx is not None:

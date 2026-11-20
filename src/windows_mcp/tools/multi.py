@@ -126,6 +126,8 @@ def register(mcp, *, get_desktop, get_analytics):
             for (x, y), (_, text) in zip(resolved_coords, processed_labels):
                 locs.append([x, y, text])
 
-        desktop.multi_edit(locs)
+        notes = desktop.multi_edit(locs)
         elements_str = ", ".join([f"({e[0]},{e[1]}) with text '{e[2]}'" for e in locs])
-        return f"Multi-edited elements at: {elements_str}"
+        warnings = [n for n in notes or [] if isinstance(n, str) and n.startswith("Warning")]
+        result = f"Multi-edited elements at: {elements_str}"
+        return "\n".join([result, *warnings])

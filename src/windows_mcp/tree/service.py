@@ -19,6 +19,7 @@ from psutil import Process
 import logging
 import weakref
 import win32process
+import win32gui
 import os
 
 logger = logging.getLogger(__name__)
@@ -149,6 +150,9 @@ class Tree:
         self.dom = None
         self.dom_bounding_box = None
         self.dom_is_ia2 = False
+        # Clip to the virtual screen as it is now: it can change while the server runs
+        # (a monitor plugged in or rearranged, an RDP reconnect at another size).
+        self.screen_box = self.desktop.get_screen_box()
         # Fresh budget per capture — huge lists/grids (e.g. thousands of rows) must not
         # stall UI Automation or blow up the serialized response.
         self.element_budget = TreeElementBudget(resolve_max_tree_elements())
@@ -193,9 +197,10 @@ class Tree:
                 logger.debug(f"Failed to get DOM scroll pattern: {e}")
                 dom_node=None
         elif self.dom_is_ia2 and self.dom_bounding_box is not None:
-            # Firefox / IA2 path — no UIA scroll pattern, so emit a stub ScrollElementNode
-            # with scrolling disabled. Downstream consumers (Scrape) only need a truthy
-            # dom_node and the bounding box.
+            # Firefox / IA2 path — no UIA scroll pattern, so emit a stub ScrollElementNode.
+            # Downstream consumers (Scrape) only need a truthy dom_node and the bounding
+            # box. The scroll state is unknown, so vertical_scrollable is None: False
+            # would tell Scrape that the page fits on screen.
             dom_node=ScrollElementNode(**{
                 'name':'DOM',
                 'control_type':'DocumentControl',
@@ -206,7 +211,7 @@ class Tree:
                     'has_focused': False,
                     'horizontal_scrollable': False,
                     'horizontal_scroll_percent': 0,
-                    'vertical_scrollable': False,
+                    'vertical_scrollable': None,
                     'vertical_scroll_percent': 0,
                 }
             })
@@ -357,6 +362,15 @@ class Tree:
         Windows whose owning process is listed in ``WINDOWS_MCP_EXCLUDE_PROCESSES``
         are skipped before any UIA call, so their accessibility providers are never
         entered. Skipped windows are neither traversed nor reported as failures.
+
+        A window that closes after the window list was taken (a dialog, menu or
+        notification going away) fails every UIA call. When a window's capture fails
+        and ``IsWindow`` reports that it is gone, it is neither retried nor reported
+        as a failure.
+
+        A window that still exists and fails with an error other than a timeout is
+        retried up to ``THREAD_MAX_RETRIES`` times. The wait before a retry starts at
+        0.5 seconds and doubles each time.
         """
         interactive_nodes, scrollable_nodes, dom_informative_nodes = [], [], []
         failed_handles = []
@@ -389,6 +403,10 @@ class Tree:
                     )
                     failed_handles.append(handle)
                     continue
+                if not win32gui.IsWindow(handle):
+                    # Closed since the window list was taken: nothing to walk, and not a failure.
+                    logger.debug(f"Window handle {handle} has closed; skipping it for this capture")
+                    continue
             task_inputs.append((handle, is_browser))
 
         retry_counts = {handle: 0 for handle in windows_handles}
@@ -402,7 +420,7 @@ class Tree:
                 break
             for attempt in range(THREAD_MAX_RETRIES + 1):
                 try:
-                    result = self.get_nodes(handle, is_browser, wait_time=0.5 * (2 ** (attempt - 1)) if attempt > 0 else 0, use_dom=use_dom)
+                    result = self.get_nodes(handle, is_browser, use_dom=use_dom)
                     if result:
                         element_nodes, scroll_nodes, info_nodes, win_sem_node = result
                         interactive_nodes.extend(element_nodes)
@@ -420,6 +438,13 @@ class Tree:
                             f"skipping it for this capture. Error: {e}"
                         )
                         failed_handles.append(handle)
+                        break
+                    if not win32gui.IsWindow(handle):
+                        # The window closed before or during its walk. No retry can reach it,
+                        # and a window that is gone is not a failed capture.
+                        logger.debug(
+                            f"Window handle {handle} has closed; skipping it for this capture"
+                        )
                         break
                     retry_counts[handle] = attempt + 1
                     try:
@@ -754,6 +779,19 @@ class Tree:
                         if isinstance(node,DocumentControl):
                             is_interactive=True
 
+                        # An edit field scrolled out of view passes the visibility check above,
+                        # which keeps edits that UIA reports off-screen. Clipped to its page or
+                        # window and to the screen, its box is empty: its center would be (0,0),
+                        # the top-left corner of the primary display, where Click and Type with
+                        # its label would go. Leave out what has nothing on screen, as the IA2
+                        # walk and the word nodes do.
+                        if is_interactive:
+                            clip_box = window_bounding_box
+                            if is_browser and is_dom:
+                                clip_box = self.dom_bounding_box
+                            visible_box = self.iou_bounding_box(clip_box, element_bounding_box)
+                            is_interactive = visible_box.width > 0 and visible_box.height > 0
+
                         if is_interactive:
                             is_focused = node.CachedHasKeyboardFocus
                             name = node.CachedName.strip()
@@ -771,6 +809,16 @@ class Tree:
                                 help_text = node.CachedHelpText
                                 if help_text:
                                     metadata['help_text']=help_text.encode('ascii', 'ignore').decode('ascii')
+                            except Exception:
+                                pass
+
+                            # Mark the selected radio button, tab or list/tree item. IsSelected is in
+                            # the walk's cache request; elements without SelectionItem report its
+                            # default, False.
+                            try:
+                                is_selected = node.GetCachedPropertyValue(PropertyId.SelectionItemIsSelectedProperty)
+                                if is_selected is True:
+                                    metadata['is_selected'] = True
                             except Exception:
                                 pass
 
@@ -863,12 +911,6 @@ class Tree:
                                 try:
                                     is_selection_required=node.GetCachedPropertyValue(PropertyId.SelectionIsSelectionRequiredProperty)
                                     metadata['is_selection_required']=is_selection_required
-                                except Exception:
-                                    pass
-
-                                try:
-                                    is_selected=node.GetCachedPropertyValue(PropertyId.SelectionItemIsSelectedProperty)
-                                    metadata['is_selected']=is_selected
                                 except Exception:
                                     pass
 
@@ -1127,16 +1169,17 @@ class Tree:
             window_name=node.Name.strip()
             window_name=self.app_name_correction(window_name)
 
-            window_sem_node: Optional[SemanticNode] = None
-            if not is_browser:
-                window_sem_node = SemanticNode(
-                    control_type='Window',
-                    element_type='window',
-                    name=window_name,
-                    window_name=window_name,
-                )
+            window_sem_node = SemanticNode(
+                control_type='Window',
+                element_type='window',
+                name=window_name,
+                window_name=window_name,
+            )
+            # A browser's own controls (tabs, address bar, toolbar buttons, its dialogs) join the
+            # tree like any app's. use_dom=True leaves them out and keeps the page alone.
+            traversal_parent = None if is_browser and use_dom else window_sem_node
 
-            self.tree_traversal(node, window_bounding_box, window_name, is_browser, interactive_nodes, scrollable_nodes, dom_interactive_nodes, dom_informative_nodes, is_dom=False, is_dialog=False, element_cache_req=element_cache_req, children_cache_req=children_cache_req, current_semantic_node=window_sem_node)
+            self.tree_traversal(node, window_bounding_box, window_name, is_browser, interactive_nodes, scrollable_nodes, dom_interactive_nodes, dom_informative_nodes, is_dom=False, is_dialog=False, element_cache_req=element_cache_req, children_cache_req=children_cache_req, current_semantic_node=traversal_parent)
 
             # IA2 fallback: Firefox doesn't expose RootWebArea via UIA, so the traversal
             # above finds no DOM content. If this is a browser window and UIA gave us no
@@ -1197,17 +1240,11 @@ class Tree:
                 logger.debug(f'DOM informative nodes:{len(dom_informative_nodes)}')
             logger.debug(f'Scrollable nodes:{len(scrollable_nodes)}')
 
-            if not is_browser and window_sem_node is not None:
-                # tree_traversal visits reversed(children) for native apps — fix ordering now
-                _reverse_children_order(window_sem_node)
-            elif is_browser:
-                # Build browser window semantic tree post-hoc from flat DOM lists
-                window_sem_node = SemanticNode(
-                    control_type='Window',
-                    element_type='window',
-                    name=window_name,
-                    window_name=window_name,
-                )
+            # tree_traversal visits reversed(children) for native apps — fix ordering now
+            _reverse_children_order(window_sem_node)
+            if is_browser:
+                # The page comes from the flat DOM lists, in page order, after the browser's own
+                # controls. The walk enters RootWebArea without a semantic parent.
                 for n in dom_interactive_nodes:
                     window_sem_node.add_child(SemanticNode(
                         control_type=n.control_type,

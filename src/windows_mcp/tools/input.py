@@ -372,6 +372,10 @@ def register(
             raise ValueError("mode must be one of: physical, semantic, auto")
         if loc is None and label is None:
             raise ValueError("Either loc or label must be provided.")
+        # For a negative count Desktop.click() made one left click, or no right or
+        # middle click, and the reply began with "None".
+        if clicks < 0:
+            raise ValueError("clicks must be 0 or more")
 
         if mode in ("semantic", "auto") and label is not None:
             semantic_result = _semantic_click(
@@ -395,9 +399,12 @@ def register(
         if label is None:
             _check_point_integrity(x, y)
         before = _overlay_before() if clicks else None
-        desktop.click(loc=loc, button=button, clicks=clicks)
-        num_clicks = {0: "Hover", 1: "Single", 2: "Double"}
-        result = f"{num_clicks.get(clicks)} {button} clicked at ({x},{y})."
+        warning = desktop.click(loc=loc, button=button, clicks=clicks)
+        num_clicks = {0: "Hover", 1: "Single", 2: "Double", 3: "Triple"}
+        result = f"{num_clicks.get(clicks, f'{clicks}x')} {button} clicked at ({x},{y})."
+        if warning:
+            # A click at a disabled window is dropped by Windows, so say what blocked it.
+            notes.append(warning)
         if clicks:
             opened = _overlay_note(before)
             if opened:
@@ -466,9 +473,12 @@ def register(
         name="Type",
         description=(
             "Types text at specified coordinates [x, y] or passing a UI element's label (#N from "
-            "Snapshot). Set clear=True to clear existing text first, False to append. Set "
-            "press_enter=True to submit after typing. Set caret_position to 'start' (beginning), "
-            "'end' (end), or 'idle' (default). Provide either loc or label. clear and press_enter "
+            "Snapshot). Set clear=True to clear existing text first (Home, Shift+End, Backspace; "
+            "never Ctrl+A), False to append; the answer says how the field was cleared and "
+            "what it reads back, and warns when focus moved away while typing. Set "
+            "press_enter=True to submit after typing. Set caret_position to 'start' or 'end' "
+            "(Home/End; Ctrl+Home/Ctrl+End in a multi-line field), or 'idle' (default). "
+            "Provide either loc or label. clear and press_enter "
             "accept only true or false. An empty text types nothing, so combine it with "
             "clear=True to just empty a field. A label is verified live and auto-waited like in "
             "Click (wait_timeout, snapshot_id). mode='semantic' writes the value through UI "
@@ -522,13 +532,15 @@ def register(
         x, y = loc[0], loc[1]
         if label is None:
             _check_point_integrity(x, y)
-        desktop.type(
+        note = desktop.type(
             loc=loc,
             text=text,
             caret_position=caret_position,
             clear=clear,
             press_enter=press_enter,
         )
+        if isinstance(note, str) and note:
+            notes.append(note)
         notes.append("disposition: " + disposition_text("delivered_unverified"))
         return "\n".join([f"Typed {text} at ({x},{y}).", *notes])
 
@@ -594,15 +606,11 @@ def register(
             )
         if loc and len(loc) != 2:
             raise ValueError("Location must be a list of exactly 2 integers [x, y]")
-        response = desktop.scroll(loc, type, direction, wheel_times)
-        if response:
-            return response
-        return (
-            f"Scrolled {type} {direction} by {wheel_times} wheel times"
-            + f" at ({loc[0]},{loc[1]})."
-            if loc
-            else ""
-        )
+        desktop.scroll(loc, type, direction, wheel_times)
+        # The conditional used to cover the whole message, so a scroll at the
+        # mouse position (loc=None) answered with an empty string.
+        where = f"({loc[0]},{loc[1]})" if loc else "the current mouse position"
+        return f"Scrolled {type} {direction} by {wheel_times} wheel times at {where}."
 
     @mcp.tool(
         name="Move",

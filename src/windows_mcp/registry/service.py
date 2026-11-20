@@ -11,6 +11,7 @@ the path as written, and Windows PowerShell 5.1's New-Item has no -LiteralPath.
 """
 
 import logging
+import re
 
 from windows_mcp.powershell import PowerShellExecutor
 from windows_mcp.powershell.utils import ps_quote
@@ -20,18 +21,98 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
+# Sets $kind and $value for the value $name of $key, as stored: an ExpandString
+# keeps its %VARIABLES%, Binary is .reg hex and DWord/QWord are unsigned.
+# RegistryKey.GetValue returns DWord/QWord signed. When $byteLimit is set, a
+# longer Binary value shows that many bytes and then its length.
+_STORED_VALUE = (
+    "$kind = $key.GetValueKind($name); "
+    "$value = $key.GetValue($name, $null, 'DoNotExpandEnvironmentNames'); "
+    "switch ($kind) { "
+    "'DWord' { $value = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int]$value), 0) } "
+    "'QWord' { $value = [BitConverter]::ToUInt64([BitConverter]::GetBytes([long]$value), 0) } }; "
+    "if ($value -is [byte[]]) { "
+    "$length = $value.Count; $bytes = $value; "
+    "if ($byteLimit -and $length -gt $byteLimit) { $bytes = $value[0..($byteLimit - 1)] }; "
+    "$value = 'hex:' + (($bytes | ForEach-Object { $_.ToString('x2') }) -join ','); "
+    'if ($bytes.Count -lt $length) { $value += ",... ($length bytes)" } }; '
+)
+
+
 def get_value(path: str, name: str) -> str:
-    """Read a registry value at *path* with the given *name*."""
+    """Read a registry value at *path* with the given *name*.
+
+    The answer names the value's type and shows the value as stored, in the form
+    set mode takes back: an ExpandString keeps its %VARIABLES% (Get-ItemProperty
+    expanded them), a Binary value is .reg hex ("hex:01,02,ff") instead of one
+    decimal byte per line, which read the same as a MultiString of numbers, and
+    a DWord or QWord is unsigned.
+    """
     q_path = ps_quote(path)
     q_name = ps_quote(name)
+    # Value names may contain wildcard characters; file paths such as
+    # "setup[1].exe" are common value names. GetValueNames() and GetValue() take
+    # the name literally. RegistryKey names the default value "", which the
+    # registry provider shows as "(default)".
     command = (
-        f"Get-ItemProperty -LiteralPath {q_path} -Name {q_name} | "
-        f"Select-Object -ExpandProperty {q_name}"
+        f"$key = Get-Item -LiteralPath {q_path} -ErrorAction Stop; "
+        f"$name = {q_name}; $names = $key.GetValueNames(); "
+        f"if ($name -eq '(default)' -and $names -notcontains $name) {{ $name = '' }}; "
+        f"if ($names -notcontains $name) {{ throw ('Property ' + {q_name} + "
+        f"' does not exist at path ' + {q_path} + '.') }}; "
+        + _STORED_VALUE
+        + "if ($kind -eq 'MultiString') { $value = $value -join \"`n\" }; "
+        'Write-Output "$kind"; Write-Output "$value"'
     )
     response, status = PowerShellExecutor.execute_command(command)
     if status != 0:
         return f'Error reading registry: {response.strip()}'
-    return f'Registry value [{path}] "{name}" = {response.strip()}'
+    # Drop only the line break Write-Output adds; the value may end in its own.
+    kind, _, value = response.partition("\n")
+    value = value.removesuffix("\n").removesuffix("\r")
+    return f'Registry value [{path}] "{name}" (type: {kind.strip()}) = {value}'
+
+
+def _parse_binary(value: str) -> list[int]:
+    """Parse the bytes of a Binary value.
+
+    Bytes are separated by commas or whitespace and written in decimal or with
+    a 0x prefix ("1, 2, 0xff"). A leading "hex:" switches to the .reg file
+    notation, where every byte is hexadecimal ("hex:01,00,ff").
+    """
+    text = value.strip()
+    base = 10
+    if text.lower().startswith("hex:"):
+        text, base = text[4:], 16
+    result = []
+    for token in re.split(r"[\s,]+", text):
+        if not token:
+            continue
+        digits, token_base = token, base
+        if token.lower().startswith("0x"):
+            digits, token_base = token[2:], 16
+        try:
+            byte = int(digits, token_base)
+        except ValueError:
+            raise ValueError(f"{token!r} is not a byte") from None
+        if not 0 <= byte <= 255:
+            raise ValueError(f"{token!r} is outside 0-255")
+        result.append(byte)
+    return result
+
+
+def _value_expression(value: str, reg_type: RegistryType) -> str:
+    """Return the PowerShell expression Set-ItemProperty receives as -Value.
+
+    Binary and MultiString values are arrays. Passed as one string, PowerShell
+    converts "1,2,3" to the single byte 123 (it reads the commas as thousands
+    separators) and stores a multi-line string as one item.
+    """
+    if reg_type == "Binary":
+        return "([byte[]]@(" + ",".join(str(b) for b in _parse_binary(value)) + "))"
+    if reg_type == "MultiString":
+        return "([string[]]@(" + ",".join(ps_quote(s) for s in value.splitlines()) + "))"
+    return ps_quote(value)
 
 
 def set_value(path: str, name: str, value: str, reg_type: RegistryType = 'String') -> str:
@@ -43,7 +124,10 @@ def set_value(path: str, name: str, value: str, reg_type: RegistryType = 'String
         )
     q_path = ps_quote(path)
     q_name = ps_quote(name)
-    q_value = ps_quote(value)
+    try:
+        q_value = _value_expression(value, reg_type)
+    except ValueError as e:
+        return f"Error: invalid {reg_type} value {value!r}: {e}"
     command = (
         f"if (-not (Test-Path -LiteralPath {q_path})) {{ New-Item -Path {q_path} -Force | Out-Null }}; "
         f"Set-ItemProperty -LiteralPath {q_path} -Name {q_name} -Value {q_value} -Type {reg_type} -Force"
@@ -57,7 +141,12 @@ def set_value(path: str, name: str, value: str, reg_type: RegistryType = 'String
 def delete_entry(path: str, name: str | None = None) -> str:
     """Delete a registry value when *name* is provided, otherwise remove the entire key."""
     q_path = ps_quote(path)
-    if name:
+    if name is not None:
+        if not name:
+            # An empty name used to count as no name, so it removed the whole key
+            # and every sub-key. The PowerShell cmdlets cannot address a value by
+            # an empty name either (get and set fail on it), so refuse it here.
+            return "Error: name must not be empty. Omit name to delete the whole key."
         q_name = ps_quote(name)
         command = f"Remove-ItemProperty -LiteralPath {q_path} -Name {q_name} -Force"
         response, status = PowerShellExecutor.execute_command(command)
@@ -71,23 +160,38 @@ def delete_entry(path: str, name: str | None = None) -> str:
     return f'Registry key [{path}] deleted.'
 
 
-# Items of a binary or multi-string value that list mode shows before an
-# ellipsis. Format-List shows 4 by default; get mode returns the whole value.
+# Items of a multi-string value, and bytes of a binary value, that list mode
+# shows before an ellipsis. Format-List shows 4 items by default; get mode
+# returns the whole value.
 _LIST_ITEM_LIMIT = 256
 
 
 def list_key(path: str) -> str:
-    """List values and sub-keys under *path*."""
+    """List values and sub-keys under *path*.
+
+    Each value is listed as "name (type) : value", with the value as stored:
+    an ExpandString keeps its %VARIABLES%, Binary is .reg hex and DWord/QWord
+    are unsigned, as in get mode. A multi-string value is listed as
+    "{a, b}"; get mode gives it one item per line, the form set takes.
+    Get-ItemProperty expanded the %VARIABLES% of an ExpandString and did not
+    say which type a value had. A binary value longer than _LIST_ITEM_LIMIT
+    bytes is cut there, followed by its length.
+    """
     q_path = ps_quote(path)
-    # Exclude only the five provider properties Get-ItemProperty adds ("PS*"
-    # also hid values such as PSModulePath), show up to _LIST_ITEM_LIMIT items of
-    # binary and multi-string values instead of 4, and keep Windows PowerShell
-    # 5.1 from wrapping long values at the console width.
+    # Read every value name from the key itself (Get-ItemProperty also added
+    # PS* provider properties), show up to _LIST_ITEM_LIMIT items of a
+    # multi-string value instead of 4, and keep Windows PowerShell 5.1 from
+    # wrapping long values at the console width.
     command = (
-        f"$FormatEnumerationLimit = {_LIST_ITEM_LIMIT}; "
-        f"$values = (Get-ItemProperty -LiteralPath {q_path} -ErrorAction Stop | "
-        f"Select-Object * -ExcludeProperty PSPath, PSParentPath, PSChildName, PSDrive, PSProvider "
-        f"| Format-List | Out-String -Width ([int]::MaxValue)).Trim(); "
+        f"$FormatEnumerationLimit = {_LIST_ITEM_LIMIT}; $byteLimit = {_LIST_ITEM_LIMIT}; "
+        f"$key = Get-Item -LiteralPath {q_path} -ErrorAction Stop; "
+        "$listed = [ordered]@{}; "
+        "foreach ($name in $key.GetValueNames()) { "
+        + _STORED_VALUE
+        + "$label = if ($name) { $name } else { '(default)' }; "
+        '$listed["$label ($kind)"] = $value }; '
+        "$values = if ($listed.Count) { ([pscustomobject]$listed "
+        "| Format-List | Out-String -Width ([int]::MaxValue)).Trim() } else { '' }; "
         f"$subkeys = (Get-ChildItem -LiteralPath {q_path} -ErrorAction SilentlyContinue | "
         f"Select-Object -ExpandProperty PSChildName) -join \"`n\"; "
         f"if ($values) {{ Write-Output \"Values:`n$values\" }}; "

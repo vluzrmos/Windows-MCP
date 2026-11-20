@@ -1,8 +1,11 @@
+import sys
+import uuid
 from unittest.mock import patch
 
 import pytest
 
 from windows_mcp import registry
+from windows_mcp.powershell import PowerShellExecutor
 from windows_mcp.powershell.utils import ps_quote
 
 
@@ -43,11 +46,9 @@ class TestPsQuote:
 
 class TestRegistryGet:
     def test_success(self):
-        with patch(EXECUTE_COMMAND_PATH, return_value=("42\n", 0)):
+        with patch(EXECUTE_COMMAND_PATH, return_value=("DWord\r\n42\r\n", 0)):
             result = registry.get_value(path="HKCU:\\Software\\Test", name="MyValue")
-        assert 'MyValue' in result
-        assert '42' in result
-        assert 'Error' not in result
+        assert result == 'Registry value [HKCU:\\Software\\Test] "MyValue" (type: DWord) = 42'
 
     def test_failure(self):
         with patch(EXECUTE_COMMAND_PATH, return_value=("Property not found", 1)):
@@ -85,8 +86,38 @@ class TestRegistrySet:
     def test_all_valid_types(self):
         with patch(EXECUTE_COMMAND_PATH, return_value=("", 0)):
             for reg_type in ("String", "ExpandString", "Binary", "DWord", "MultiString", "QWord"):
-                result = registry.set_value(path="HKCU:\\Test", name="K", value="V", reg_type=reg_type)
+                result = registry.set_value(path="HKCU:\\Test", name="K", value="1", reg_type=reg_type)
                 assert 'Error' not in result
+
+    @pytest.mark.parametrize(
+        ("value", "expression"),
+        [
+            ("1,2,3", "([byte[]]@(1,2,3))"),
+            ("0xde, 0xad", "([byte[]]@(222,173))"),
+            ("hex:9e,1e,07,80", "([byte[]]@(158,30,7,128))"),
+            ("222", "([byte[]]@(222))"),
+            ("", "([byte[]]@())"),
+        ],
+    )
+    def test_binary_value_is_byte_array(self, value, expression):
+        with patch(EXECUTE_COMMAND_PATH, return_value=("", 0)) as mock_exec:
+            registry.set_value(path="HKCU:\\Test", name="K", value=value, reg_type="Binary")
+        assert f"-Value {expression} -Type Binary" in mock_exec.call_args[0][0]
+
+    @pytest.mark.parametrize("value", ["deadbeef", "1,256", "0xzz"])
+    def test_invalid_binary_value(self, value):
+        with patch(EXECUTE_COMMAND_PATH) as mock_exec:
+            result = registry.set_value(path="HKCU:\\Test", name="K", value=value, reg_type="Binary")
+        assert result.startswith("Error: invalid Binary value")
+        mock_exec.assert_not_called()
+
+    def test_multistring_value_is_one_item_per_line(self):
+        with patch(EXECUTE_COMMAND_PATH, return_value=("", 0)) as mock_exec:
+            registry.set_value(
+                path="HKCU:\\Test", name="K", value="a\r\nit's\nc", reg_type="MultiString"
+            )
+        cmd = mock_exec.call_args[0][0]
+        assert "-Value ([string[]]@('a','it''s','c')) -Type MultiString" in cmd
 
     def test_creates_key_if_missing(self):
         with patch(EXECUTE_COMMAND_PATH, return_value=("", 0)) as mock_exec:
@@ -124,6 +155,14 @@ class TestRegistryDelete:
             result = registry.delete_entry(path="HKCU:\\Software\\Protected")
         assert 'Error deleting registry key' in result
 
+    def test_empty_value_name_deletes_nothing(self):
+        # An empty name is a value name, not a missing one: it must not fall
+        # through to removing the whole key.
+        with patch(EXECUTE_COMMAND_PATH) as mock_exec:
+            result = registry.delete_entry(path="HKCU:\\Software\\Test", name="")
+        assert result == "Error: name must not be empty. Omit name to delete the whole key."
+        mock_exec.assert_not_called()
+
 
 class TestRegistryList:
     def test_success(self):
@@ -148,12 +187,14 @@ class TestRegistryList:
             registry.list_key(path="HKCU:\\Software\\Test")
         return mock_exec.call_args[0][0]
 
-    def test_excludes_only_provider_properties(self):
-        # Get-ItemProperty adds these five; a PS* pattern also hides registry
-        # values whose names start with PS, such as PSModulePath.
+    def test_lists_value_names_from_the_key(self):
+        # Get-ItemProperty added five PS* provider properties, and a PS* filter
+        # also hid registry values such as PSModulePath. The key's own value
+        # names need no filter.
         cmd = self._command()
         assert "PS*" not in cmd
-        assert "-ExcludeProperty PSPath, PSParentPath, PSChildName, PSDrive, PSProvider |" in cmd
+        assert "Get-ItemProperty" not in cmd
+        assert "$key.GetValueNames()" in cmd
 
     def test_raises_item_limit_and_line_width(self):
         # Format-List shows 4 items of an array value by default, and Windows
@@ -198,3 +239,76 @@ class TestRegistryLiteralPath:
         cmd = self._command(registry.list_key)
         self._assert_literal(cmd)
         assert f"Get-ChildItem -LiteralPath {ps_quote(self.PATH)}" in cmd
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="writes the Windows registry")
+class TestRegistryArrayValuesRoundTrip:
+    """Binary and MultiString values reach the registry as arrays, not one string."""
+
+    @pytest.fixture
+    def key(self):
+        path = f"HKCU:\\Software\\windows-mcp-test-{uuid.uuid4().hex}"
+        yield path
+        registry.delete_entry(path=path)
+
+    def _stored(self, key):
+        output, status = PowerShellExecutor.execute_command(
+            f"(Get-Item -LiteralPath {ps_quote(key)}).GetValue('V') -join '|'"
+        )
+        assert status == 0, output
+        return output.strip()
+
+    def test_binary(self, key):
+        result = registry.set_value(path=key, name="V", value="1,2,3", reg_type="Binary")
+        assert "set to" in result, result
+        assert self._stored(key) == "1|2|3"
+
+    def test_multistring(self, key):
+        result = registry.set_value(path=key, name="V", value="a\nb", reg_type="MultiString")
+        assert "set to" in result, result
+        assert self._stored(key) == "a|b"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="writes the Windows registry")
+class TestRegistryGetWildcardValueName:
+    """Value names may contain [ ] * ?, as file paths such as "setup[1].exe" do.
+    Get mode must return the value with exactly that name."""
+
+    VALUES = {"setup1.exe": "other app", "setup[1].exe": "target", "*": "star"}
+
+    @pytest.fixture
+    def key(self):
+        path = f"HKCU:\\Software\\windows-mcp-test-{uuid.uuid4().hex}"
+        for name, value in self.VALUES.items():
+            result = registry.set_value(path=path, name=name, value=value)
+            assert "set to" in result, result
+        yield path
+        registry.delete_entry(path=path)
+
+    @pytest.mark.parametrize("name", list(VALUES))
+    def test_reads_the_named_value(self, key, name):
+        result = registry.get_value(path=key, name=name)
+        assert result == f'Registry value [{key}] "{name}" (type: String) = {self.VALUES[name]}'
+
+    def test_missing_name_is_an_error(self, key):
+        # Get-ItemProperty returns no property, and no error, for a missing name
+        # that contains a wildcard character.
+        result = registry.get_value(path=key, name="setup?.exe")
+        assert result.startswith("Error reading registry:"), result
+        assert "setup?.exe" in result, result
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="writes the Windows registry")
+def test_delete_with_empty_value_name_keeps_the_key():
+    key = f"HKCU:\\Software\\windows-mcp-test-{uuid.uuid4().hex}"
+    assert "set to" in registry.set_value(path=key, name="V", value="kept")
+    assert "set to" in registry.set_value(path=f"{key}\\Child", name="V", value="kept")
+    try:
+        result = registry.delete_entry(path=key, name="")
+        assert result.startswith("Error:"), result
+        assert registry.get_value(path=key, name="V").endswith('"V" (type: String) = kept')
+        assert registry.get_value(path=f"{key}\\Child", name="V").endswith(
+            '"V" (type: String) = kept'
+        )
+    finally:
+        registry.delete_entry(path=key)

@@ -20,6 +20,7 @@ from windows_mcp.tools._local_vision import (
     run_openai_vision_llm,
     run_winocr,
 )
+from windows_mcp.desktop.views import DesktopState
 
 
 logger = logging.getLogger(__name__)
@@ -87,14 +88,32 @@ def _snapshot_profile_enabled() -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _as_bool(value: bool | str) -> bool:
-    return value is True or (isinstance(value, str) and value.lower() == "true")
-
-
 def _as_region(value: list | str | None) -> list | None:
     if value is None or isinstance(value, list):
         return value
     return json.loads(value)
+
+
+WINDOWS_NOT_LISTED = "Not listed: Screenshot skips window enumeration. Call Snapshot for windows."
+
+
+def _image_origin(desktop_state: DesktopState) -> tuple[int, int]:
+    """Return the screen coordinate of the screenshot's top-left pixel.
+
+    A region or display capture starts at the corner of its rectangle. A full capture
+    covers the virtual screen, which starts left of or above (0, 0) when a monitor sits
+    left of or above the primary one.
+    """
+    region = desktop_state.screenshot_region
+    if region is not None:
+        return region.left, region.top
+    displays = desktop_state.available_displays
+    if not displays:
+        return 0, 0
+    return (
+        min(display.bounding_box.left for display in displays),
+        min(display.bounding_box.top for display in displays),
+    )
 
 
 def capture_desktop_state(
@@ -167,8 +186,13 @@ def capture_desktop_state(
     interactive_elements = desktop_state.tree_state.interactive_elements_to_string()
     scrollable_elements = desktop_state.tree_state.scrollable_elements_to_string()
     semantic_tree = desktop_state.tree_state.semantic_tree_to_string()
-    windows = desktop_state.windows_to_string()
-    active_window = desktop_state.active_window_to_string()
+    if use_ui_tree:
+        windows = desktop_state.windows_to_string()
+        active_window = desktop_state.active_window_to_string()
+    else:
+        # The fast path never enumerates windows (see Desktop.get_state), so an empty
+        # list here means "not looked at", not "there are none".
+        windows = active_window = WINDOWS_NOT_LISTED
     active_desktop = desktop_state.active_desktop_to_string()
     all_desktops = desktop_state.desktops_to_string()
     if profile_enabled:
@@ -183,12 +207,11 @@ def capture_desktop_state(
         screenshot_image = pil_img
         scale = desktop_state.screenshot_scale or 1.0
         coord_scale = round(1.0 / scale, 6) if scale > 0 else 1.0
-        region_offset = (0, 0)
-        if desktop_state.screenshot_region is not None:
-            region_offset = (
-                int(desktop_state.screenshot_region.left),
-                int(desktop_state.screenshot_region.top),
-            )
+        # Screen coordinate of image pixel (0, 0): a region or display capture starts at
+        # its own corner, and a full capture at the virtual screen's, which is left of or
+        # above (0, 0) when a monitor sits left of or above the primary one.
+        origin_x, origin_y = _image_origin(desktop_state)
+        region_offset = (int(origin_x), int(origin_y))
 
         if resolved_vision_mode in ("image", "llm", "winocr+llm"):
             buffered = io.BytesIO()
@@ -234,6 +257,10 @@ def capture_desktop_state(
             }
             screenshot_bytes = None
 
+    # The Desktop keeps this state until the next capture. Everything after this
+    # point uses the bytes or this call's screenshot_image, so drop the Desktop's
+    # reference instead of holding a copy of the screen in memory between calls.
+    desktop_state.screenshot = None
     if profile_enabled:
         screenshot_encode_ms = (time.perf_counter() - stage_started_at) * 1000
         logger.info(
@@ -332,17 +359,29 @@ def build_snapshot_response(
     if desktop_state.screenshot_original_size:
         orig = desktop_state.screenshot_original_size
         scale = desktop_state.screenshot_scale or 1.0
+        origin_x, origin_y = _image_origin(desktop_state)
+        origin = f"({origin_x},{origin_y})"
         if scale < 1.0:
             coord_scale = round(1.0 / scale, 6)
+            add_origin = ""
+            if (origin_x, origin_y) != (0, 0):
+                add_origin = f", then add {origin}, the screen coordinate of image pixel (0, 0),"
             metadata_text += (
                 f"Screenshot Original Size: {orig.to_string()}\n"
                 f"Screenshot Coordinate Scale: {coord_scale} "
                 f"— image pixels are downscaled; multiply every image pixel coordinate by "
-                f"{coord_scale} before passing to Click, Move, Scroll, or any loc= argument "
-                f"(e.g. image pixel (200, 150) → screen coordinate ({round(200 * coord_scale)}, {round(150 * coord_scale)}))\n"
+                f"{coord_scale}{add_origin} before passing to Click, Move, Scroll, or any loc= argument "
+                f"(e.g. image pixel (200, 150) → screen coordinate ({origin_x + round(200 * coord_scale)}, {origin_y + round(150 * coord_scale)}))\n"
             )
         else:
             metadata_text += f"Screenshot Size: {orig.to_string()}\n"
+            if (origin_x, origin_y) != (0, 0):
+                metadata_text += (
+                    f"Screenshot Origin: {origin} — image pixel (0, 0) is screen coordinate {origin}; "
+                    f"add {origin} to every image pixel coordinate before passing to Click, Move, "
+                    f"Scroll, or any loc= argument "
+                    f"(e.g. image pixel (200, 150) → screen coordinate ({origin_x + 200}, {origin_y + 150}))\n"
+                )
     if desktop_state.available_displays:
         metadata_text += "Visible Displays: "
         metadata_text += "; ".join(

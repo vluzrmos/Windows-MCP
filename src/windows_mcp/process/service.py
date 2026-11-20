@@ -10,11 +10,34 @@ __all__ = ["list_processes", "kill_process"]
 CPU_SAMPLE_SECONDS = 0.25
 
 
+def _filter_by_name(procs: list[dict], name: str) -> list[dict]:
+    """Keep the processes whose name contains *name*, or fuzzy matches when none does.
+
+    A fuzzy score alone lets unrelated names through ("svchost.exe" scores
+    above 60 against "chrome.exe" on the shared ".exe"), and the extra rows
+    push the real matches past *limit*. Fuzzy matching stays as the fallback
+    for a misspelled name.
+    """
+    query = name.strip().lower()
+    stem = query.removesuffix(".exe")
+    exact = [p for p in procs if stem and stem in p["name"].lower()]
+    if exact:
+        return exact
+    from thefuzz import fuzz
+
+    return [p for p in procs if fuzz.partial_ratio(query, p["name"].lower()) > 60]
+
+
 def list_processes(
     name: str | None = None,
     sort_by: Literal["memory", "cpu", "name"] = "memory",
     limit: int = 20,
 ) -> str:
+    # A slice with limit 0 is empty and a negative one drops processes from the
+    # end, so these said "No processes found." or left out the last few.
+    if limit < 1:
+        raise ValueError(f"limit must be at least 1, got {limit}")
+
     import psutil
     from tabulate import tabulate
 
@@ -51,9 +74,7 @@ def list_processes(
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
     if name:
-        from thefuzz import fuzz
-
-        procs = [p for p in procs if fuzz.partial_ratio(name.lower(), p["name"].lower()) > 60]
+        procs = _filter_by_name(procs, name)
     sort_key = {
         "memory": lambda x: x["mem_mb"],
         "cpu": lambda x: x["cpu"],
@@ -99,9 +120,13 @@ def kill_process(
         except psutil.AccessDenied:
             return f"Access denied to kill PID {pid}. Try running as administrator."
     else:
+        # psutil reports image names with their extension ("notepad.exe"). Also accept
+        # the name without it ("notepad"), as Get-Process and Stop-Process take it.
+        wanted = name.lower()
+        targets = {wanted} if wanted.endswith(".exe") else {wanted, f"{wanted}.exe"}
         for p in psutil.process_iter(["pid", "name"]):
             try:
-                if p.info["name"] and p.info["name"].lower() == name.lower():
+                if p.info["name"] and p.info["name"].lower() in targets:
                     if force:
                         p.kill()
                     else:

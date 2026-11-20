@@ -24,7 +24,11 @@ from windows_mcp.desktop.control_win32 import (
     _key,
     _interactive_desktop,
     run_input_monitor,
+    wake_pump,
 )
+
+# The hand leaving the mouse right after clicking Allow must not take the desktop back.
+_CONSENT_GRACE_SECONDS = 1.0
 
 
 def describe_failure(exc: BaseException) -> str:
@@ -60,12 +64,22 @@ class ControlCoordinator:
         # Set once by the server lifespan before any tools or hooks start.
         self.enabled = True
         self.idle_timeout_seconds = 10.0
+        self.call_lease_timeout_seconds = 30.0
         self.policy = "strict"
+        self.consent_countdown_seconds = 10
         self._lock = threading.Lock()
+        # Granted by the consent prompt; revoked whenever the person takes the desktop.
+        self._consented = False
+        # Refused, ignored while working, or took the desktop back: do not ask again until idle.
+        self._declined = False
+        self._consent_started = 0.0
+        # Physical input stamped before this moment is not user activity: inf
+        # while the prompt is open, then the moment the person allowed control.
+        self._input_floor = 0.0
         self._state = "unavailable"
         self._generation = 0
         self._active_calls = 0
-        self._lease_until = 0.0
+        self._active_call_since: float | None = None
         self._last_user = 0.0
         self._last_physical_event = 0.0  # Written before hook events enter the queue.
         self._last_point: tuple[int, int] | None = None  # Cursor baseline for activity.
@@ -88,6 +102,11 @@ class ControlCoordinator:
         self._watchdog: threading.Thread | None = None
         self._startup_error: Exception | None = None
         self._thread_beat = 0.0
+        # The pump parks in a message wait; its event lets other threads wake it,
+        # and an idle pump proves liveness by answering the worker's ping.
+        self._pump_event = None
+        self._pump_idle = False
+        self._pump_ping_at = 0.0
         self._suppress = False  # Atomic snapshot read by the hook callbacks.
         self._deadline = 0.0
         self._emergency = False
@@ -145,6 +164,10 @@ class ControlCoordinator:
                 self._suppress = False
                 self._visual_armed = False
                 self.input_ledger.block_new()
+            else:
+                # The worker may be parked on an idle-state timeout; the new
+                # suppression deadline needs its quarter-second refresh now.
+                self._release_requested.set()
 
     def pause_for_capture(self) -> int | None:
         """Release physical input before an AI indicator is hidden for capture."""
@@ -234,9 +257,15 @@ class ControlCoordinator:
     def _set_locked(self, state: str) -> bool:
         if state == self._state:
             return False
-        self._state = state
+        previous, self._state = self._state, state
         if state != "ai":
             self.input_ledger.block_new()
+        if state in ("user", "unavailable"):
+            self._consented = False
+        if state == "ready":
+            self._declined = False
+        elif state == "user" and previous == "ai":
+            self._declined = True
         self._generation += 1
         self._visual_armed = state == "ai" and self._health_probe is None
         self._visual_paused = False
@@ -252,12 +281,16 @@ class ControlCoordinator:
             self._suppress = False
             self.input_ledger.block_new()
         self._deadline = time.monotonic() + 1.0 if self._suppress else 0.0
+        # Each state has its own worker cadence: re-plan the worker's wait now.
+        self._release_requested.set()
         return True
 
     def _tick_locked(self, now: float) -> bool:
         # Zero means no input has been observed, even with a timeout longer than uptime.
         stamp = self._last_physical_event
-        recent = stamp > 0 and now - stamp < self.idle_timeout_seconds
+        recent = (
+            stamp > 0 and stamp >= self._input_floor and now - stamp < self.idle_timeout_seconds
+        )
         if self._state == "ready" and recent:
             self._last_user = self._last_physical_event
             return self._set_locked("user")
@@ -268,12 +301,64 @@ class ControlCoordinator:
             and now - max(self._last_user, self._last_physical_event) >= self.idle_timeout_seconds
         ):
             return self._set_locked("ready")
-        if self._state == "ai" and not self._active_calls and now >= self._lease_until:
-            if recent:
-                self._last_user = self._last_physical_event
-                return self._set_locked("user")
+        if (
+            self._state == "ai"
+            and self._active_calls > 0
+            and self._active_call_since is not None
+            and self.call_lease_timeout_seconds > 0
+            and now - self._active_call_since >= self.call_lease_timeout_seconds
+        ):
+            # Time-bound the input suppression lease when an in-flight call stalls.
             return self._set_locked("ready")
+        # Otherwise AI control ends on release(), a user takeover, or shutdown.
         return False
+
+    def would_ask(self) -> bool:
+        """Whether a call while the person uses the desktop should ask instead of failing."""
+        return self.consent_countdown_seconds > 0 and not self._declined
+
+    def open_consent(self) -> bool:
+        """Start a consent prompt if this call would begin a new AI control period."""
+        if self.status()["state"] not in ("ready", "user"):
+            return False  # Within a lease, or blocked anyway by begin_call.
+        with self._lock:
+            if (
+                self._consented
+                or self._declined
+                or self.consent_countdown_seconds <= 0
+                or self._state not in ("ready", "user")
+            ):
+                return False
+            # Moving the mouse to the prompt must not count as taking the desktop.
+            self._input_floor = math.inf
+            self._consent_started = time.monotonic()
+            return True
+
+    def close_consent(self, answer: str) -> None:
+        """Apply allow, deny, timeout or error; an ignored prompt with input denies."""
+        now = time.monotonic()
+        changed = False
+        with self._lock:
+            touched = self._last_physical_event > self._consent_started
+            granted = answer == "allow" or (answer == "timeout" and not touched)
+            # Input that answered the prompt, or follows a click on Allow within the grace,
+            # is not a takeover. Input after an unattended countdown still is.
+            if not granted:
+                self._input_floor = 0.0
+            elif answer == "allow":
+                self._input_floor = now + _CONSENT_GRACE_SECONDS
+            else:
+                self._input_floor = now
+            if granted and self._state == "user":
+                changed = self._set_locked("ready")  # The person at the desk handed it over.
+            elif touched and not granted and self._state == "ready":
+                self._last_user = now
+                changed = self._set_locked("user")
+            self._consented = granted
+            self._declined = touched and not granted
+            result = self._snapshot_locked(now)
+        if changed:
+            self._notify(result)
 
     def begin_call(self, name: str) -> int:
         if self._emergency:
@@ -309,6 +394,8 @@ class ControlCoordinator:
                 raise ControlBlocked("CONTROL_UNAVAILABLE", self._snapshot_locked(now))
             changed = self._set_locked("ai") or changed
             self._active_calls += 1
+            if self._active_call_since is None:
+                self._active_call_since = now
             token = self._generation
             result = self._snapshot_locked(now)
         if changed:
@@ -367,24 +454,24 @@ class ControlCoordinator:
     def end_call(self, token: int) -> None:
         with self._lock:
             self._active_calls = max(0, self._active_calls - 1)
-            if self._state in ("ai", "takeover_pending") and not self._active_calls:
-                self._lease_until = time.monotonic() + 120.0
+            if self._active_calls == 0:
+                self._active_call_since = None
 
     def release(self) -> dict:
-        """Immediately release AI desktop control and hide the HUD overlay."""
+        """End AI control at the agent's request and hide the HUD overlay.
+
+        A running call stops at its next checkpoint. If the user touched the
+        desktop recently, control goes to them instead of back to ready.
+        """
         if not self.enabled:
             return self._snapshot_locked(time.monotonic())
         if self._emergency:
             self._mark_unavailable()
         now = time.monotonic()
         with self._lock:
-            changed = False
             if self._state in ("ai", "takeover_pending"):
-                self._active_calls = 0
-                self._lease_until = 0.0
                 stamp = self._last_physical_event
-                recent = stamp > 0 and now - stamp < self.idle_timeout_seconds
-                if recent:
+                if stamp > 0 and now - stamp < self.idle_timeout_seconds:
                     self._last_user = stamp
                     changed = self._set_locked("user")
                 else:
@@ -449,6 +536,7 @@ class ControlCoordinator:
         self._deadline = 0.0
         self.input_ledger.block_new()
         self._release_requested.set()  # Wake the watchdog before joining it.
+        self._wake_pump()  # The pump may be parked until its next hook rotation.
         if self._thread:
             self._thread.join(timeout=2.0)
         if self._watchdog:
@@ -486,6 +574,7 @@ class ControlCoordinator:
         self.input_ledger.block_new()  # Atomic flag; hooks must never wait for AI injection.
         self._emergency = True
         self._rotate = True
+        self._wake_pump()  # Reinstall hooks now, not at the next rotation.
         # Hook callbacks must not wait on SendInput or the ledger lock. Wake
         # the existing watchdog to clear AI holds immediately off-hook.
         self._release_requested.set()
@@ -559,6 +648,13 @@ class ControlCoordinator:
         if changed:
             self._notify(result)
 
+    def _wake_pump(self) -> None:
+        """End the hook pump's current wait; never blocks, safe in hook callbacks."""
+        try:
+            wake_pump(self._pump_event)
+        except Exception:
+            pass  # Called from fail-open paths, which must never raise.
+
     def _queue(self, event: tuple) -> None:
         try:
             self._events.put_nowait(event)
@@ -583,11 +679,13 @@ class ControlCoordinator:
             else:
                 changed = self._tick_locked(now)
                 kind = event[0]
-                if (
+                # Queued events carry no stamp; if the newest input predates the
+                # consent floor, so does every event still waiting in the queue.
+                user_input = (
                     kind in ("key", "point", "raw")
-                    and self._state == "ai"
-                    and not self._visual_armed
-                ):
+                    and self._last_physical_event >= self._input_floor
+                )
+                if user_input and self._state == "ai" and not self._visual_armed:
                     # Physical input was delivered while the indicator was not armed.
                     self._last_user = now
                     changed = self._set_locked("user") or changed
@@ -597,13 +695,13 @@ class ControlCoordinator:
                     self._last_user = now
                     changed = self._set_locked("user") or changed
                     self._fast_takeover = False
-                elif kind in ("key", "point", "raw") and self._state in ("ready", "user"):
+                elif user_input and self._state in ("ready", "user"):
                     self._last_user = now
                     changed = self._set_locked("user") or changed
                 elif kind == "raw" and self._state == "ai":
                     device, dx, dy = event[1:4]
                     stamp = event[4] if len(event) > 4 else now
-                    if (dx or dy) and stamp >= self._motion_since:
+                    if (dx or dy) and stamp >= max(self._motion_since, self._input_floor):
                         if device != self._raw_device or stamp - self._last_move >= 0.5:
                             self._raw_distance = 0.0
                         self._raw_device = device

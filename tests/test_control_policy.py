@@ -119,7 +119,8 @@ def context(name):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("ending", ["success", "error", "cancel"])
 async def test_background_does_not_take_lock_or_lease(ending):
-    owner = ControlCoordinator()  # Default policy is A; no hooks installed.
+    owner = ControlCoordinator()  # No hooks installed.
+    owner.policy = "relaxed"  # This fork defaults to strict, which gates PowerShell.
     owner.begin_call = Mock(side_effect=AssertionError("background acquired lease"))
     owner.end_call = Mock(side_effect=AssertionError("background extended lease"))
     gate = ControlToolGate(owner, SimpleNamespace(remember=lambda _: None))
@@ -158,7 +159,6 @@ async def test_background_does_not_take_lock_or_lease(ending):
                 assert await task == "done"
         owner.begin_call.assert_not_called()
         owner.end_call.assert_not_called()
-        assert owner._lease_until == 0
     finally:
         release.set()
         task.cancel()
@@ -170,6 +170,7 @@ async def test_background_does_not_take_lock_or_lease(ending):
 @pytest.mark.asyncio
 async def test_protected_call_can_run_while_background_is_running():
     owner = ControlCoordinator()
+    owner.policy = "relaxed"  # This fork defaults to strict, which gates PowerShell.
     owner.status = Mock(return_value={"state": "ready"})
     owner.begin_call = Mock(return_value=7)
     owner.checkpoint = Mock()
