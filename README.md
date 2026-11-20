@@ -26,17 +26,26 @@
 
 mcp-name: io.github.CursorTouch/Windows-MCP
 
+> [!TIP]
+> **Run it in Windows Sandbox.** `windows-mcp sandbox start` boots the server inside a
+> disposable Windows Sandbox, so the agent gets its own mouse, keyboard and filesystem while
+> you keep using your PC, and nothing it does survives closing the window. See
+> [Windows Sandbox Mode](#-windows-sandbox-mode-recommended).
+
 ## 🔒 Fork Customizations (`vluzrmos/Windows-MCP`)
 
 This fork includes security, privacy, and UX improvements over the upstream repository:
 
+0. **Windows Sandbox Mode (`windows-mcp sandbox start|stop`) — recommended:**
+   - Runs the server inside a disposable Windows Sandbox session: the agent no longer competes with you for the mouse and keyboard, and its shell, file and registry changes stay in a throwaway VM. Each start uses a fresh bearer key and a host-only IP allowlist. See [Windows Sandbox Mode](#-windows-sandbox-mode-recommended).
+   - Adds `control.mouse_takeover` (default `true`); the sandbox sets it to `false` so a stray mouse movement never stops the agent.
 1. **Telemetry Disabled by Default (`ANONYMIZED_TELEMETRY=false`):**
    - PostHog telemetry is disabled out-of-the-box in `src/windows_mcp/__main__.py` and the embedded `POSTHOG_API_KEY` has been removed from `src/windows_mcp/infrastructure/analytics.py`.
 2. **Strict Control Policy by Default (`--control-policy strict`):**
    - All MCP tools (including `Snapshot`, `Screenshot`, `Scrape`, and `Wait`) activate and maintain the AI desktop control HUD overlay, preventing accidental user takeover while the agent is observing or reading content.
-3. **Extended AI Control Lease (2 Minutes) + Immediate HUD Release (`ControlStatus(action="release")`):**
-   - The AI control lease between consecutive tool calls is extended from `15s` to `120s` (`2m`) so the HUD does not prematurely disappear while the LLM is processing long content.
-   - Added `action="release"` to `ControlStatus` (and server instructions) so the agent immediately turns off the HUD overlay and returns control to the user right before sending its final response.
+3. **Immediate HUD Release (`ControlStatus(release=true)` or `action="release"`):**
+   - AI control lasts until it is released (no lease timeout between calls), so the HUD does not disappear while the LLM is processing long content.
+   - The server instructions tell the agent to release control as its last tool call, so the HUD overlay turns off and control returns to the user right before the final response. `action="release"` is kept as an alias of upstream's `release=true`.
 4. **Screenshot Capture Flash Disabled by Default (`WINDOWS_MCP_DISABLE_FLASH=1`):**
    - Disables the orange-red capture flash overlay (`flash_overlay.py`) by default so only the primary blue AI control HUD indicates active agent operation.
 5. **Dual Screenshot Resolution Modes (`resolution="compact" | "normal"`):**
@@ -461,6 +470,8 @@ npm install -g @anthropic-ai/claude-code
 ## 🖥️ Running Windows-MCP
 
 Windows-MCP runs directly on your Windows machine and exposes its tools to the connected MCP client.
+To keep the agent off your own desktop, prefer
+[Windows Sandbox Mode](#-windows-sandbox-mode-recommended) (`windows-mcp sandbox start`).
 
 ```shell
 # Runs with stdio transport (default)
@@ -494,51 +505,131 @@ See [🔐 Security & Access Control](#-security--access-control) for all options
 | `sse` | `serve --transport sse --host HOST --port PORT` | Network-accessible via Server-Sent Events |
 | `streamable-http` | `serve --transport streamable-http --host HOST --port PORT` | Network-accessible via HTTP streaming (recommended for production) |
 
-### Running in Windows Sandbox (work while the agent works)
+## 🧪 Windows Sandbox Mode (recommended)
 
-Windows has one cursor and one keyboard focus per session, so an agent on your own desktop
-always competes with you. Running the server in **Windows Sandbox** gives the agent its own
-session: it clicks and types there while you keep using the host.
+> [!IMPORTANT]
+> **This is the recommended way to run Windows-MCP.** On your own desktop the agent shares
+> your only mouse cursor and keyboard focus, and its `PowerShell`, `FileSystem`, `Registry`
+> and `Process` tools act on your real system with no undo. In Windows Sandbox the agent gets
+> its **own disposable Windows session**: it clicks, types and runs commands in there while
+> you keep working on the host, and closing the sandbox throws everything away.
 
-Requires Windows 11 24H2+ with the *Windows Sandbox* optional feature (`wsb.exe`).
+|  | On your desktop (`serve`) | In Windows Sandbox (`sandbox start`) |
+|---|---|---|
+| Mouse and keyboard | Shared with you: you wait, or take over and stop the agent | The agent has its own; you keep working |
+| Damage from a bad command | Your real files, registry and processes | A throwaway VM; gone when it closes |
+| Your logins and cookies | Every site you are signed in to | None, unless you sign in inside the sandbox |
+| Access from the network | Whatever you configure | HTTP only, fresh bearer key per start, host-only IP allowlist |
+
+### Requirements
+
+- Windows 11 **24H2 or newer**, Pro, Enterprise or Education (Windows Sandbox is not available
+  on Home), with virtualization enabled in the firmware.
+- The *Windows Sandbox* optional feature, which provides `wsb.exe`. Enable it once from an
+  elevated PowerShell and reboot:
+
+  ```powershell
+  Enable-WindowsOptionalFeature -Online -FeatureName Containers-DisposableClientVM -All
+  ```
+
+- Network access from inside the sandbox on its first boot (it downloads uv, Python and the
+  wheels; later boots reuse the cache).
+
+### Quick start
 
 ```shell
-windows-mcp sandbox start            # boots the sandbox, prints the MCP client config
-windows-mcp sandbox start --pypi     # use the PyPI release instead of this checkout
-windows-mcp sandbox start --keep-profile   # keep a browser profile (logins) between runs
-windows-mcp sandbox stop
+windows-mcp sandbox start     # boots the sandbox and prints the MCP client config
+windows-mcp sandbox stop      # shuts it down (or just close the sandbox window)
 ```
 
-What happens: the host writes a fresh auth key to `~/.windows-mcp/sandbox/shared`, starts a
-sandbox mapping that folder (`C:\mcp\shared`), a cache for uv/Python/wheels (`C:\mcp\cache`,
-so later boots are fast) and, when run from a source checkout, the checkout read-only
-(`C:\mcp\source`). The logon script `src/windows_mcp/sandbox/bootstrap.ps1` installs uv,
-starts `serve --transport streamable-http` with the key, an IP allowlist for the virtual
-switch subnet, the consent countdown off and mouse takeover off (only the keyboard, e.g.
-`Ctrl+Alt+Shift+Backspace`, takes control back from the agent), then writes `ready.json`. The command prints a
-`type: http` client entry with the sandbox IP and `Authorization: Bearer` header. Logs:
-`~/.windows-mcp/sandbox/shared/logs`.
+The first start takes a few minutes while uv, Python and the dependencies install; later starts
+reuse the cache and take seconds. When the server is up, the command prints an entry like:
 
-**Logins, MFA and CAPTCHA.** The sandbox is an ordinary window on your desktop. When the agent
-reaches a sign-in page it should stop and ask you in chat; click into the sandbox window, sign
-in, and tell the agent to continue (it can resume with `WaitFor`). Your input inside the sandbox
-never touches the host. The sandbox is disposable: closing it drops every session and cookie.
-With `--keep-profile`, start the browser with `--user-data-dir=C:\mcp\profile` to keep logins;
-that folder then holds live session cookies on the host, so protect it, and never map your real
-browser profile. Toast notifications from the `Notification` tool show inside the sandbox, not
-on the host.
+```json
+{
+  "mcpServers": {
+    "windows-mcp-sandbox": {
+      "type": "http",
+      "url": "http://172.x.y.z:8765/mcp/",
+      "headers": { "Authorization": "Bearer <fresh key>" }
+    }
+  }
+}
+```
 
-**Keep the window open.** The sandbox is an RDP-style session: when its window is minimized,
-or with `--headless` and no window, Windows may stop rendering it (black screenshots, input
-fails). Leaving it behind other windows or on another virtual desktop works.
+Add it to your MCP client. With Claude Code, for example:
 
-**Other separate sessions.** `bootstrap.ps1` takes `-Shared`, `-Source`, `-Cache`, `-Port` and
-`-Allowlist`, so it also serves as the logon script of a dedicated user in a Hyper-V VM or on a
-Windows Server with RDS. An RDP session to a second user on the *same* Windows 11 Pro/Home PC
-does not work: client editions allow one interactive session, so it signs you out of the
-console (patching `termsrv.dll` to lift that breaks the license and is not supported).
+```shell
+claude mcp add --transport http windows-mcp-sandbox http://172.x.y.z:8765/mcp/ --header "Authorization: Bearer <fresh key>"
+```
 
----
+The sandbox IP and the key change on every `sandbox start`, so update the client entry each time.
+Keep the key private: it is the only credential for the server.
+
+### Options
+
+| Option | Default | What it does |
+|---|---|---|
+| `--port` | `8765` | Port the server listens on inside the sandbox. |
+| `--memory` | `4096` | Memory given to the sandbox, in MB. |
+| `--keep-profile` | off | Map a writable `C:\mcp\profile` folder so a browser profile (logins) survives restarts. |
+| `--pypi` | off | Run the PyPI release instead of this checkout. That release is upstream's, so it lacks this fork's additions. |
+| `--headless` | off | Do not open the sandbox window. Not recommended: see *Keep the window open*. |
+| `--timeout` | `600` | Seconds to wait for the server to report ready. |
+
+### How it works
+
+1. The host creates `~/.windows-mcp/sandbox/` and writes a fresh random auth key to
+   `~/.windows-mcp/sandbox/shared`.
+2. It starts a sandbox through `wsb.exe` with these folders mapped:
+
+   | Host | Inside the sandbox | Access |
+   |---|---|---|
+   | `~/.windows-mcp/sandbox/shared` | `C:\mcp\shared` | read-write (key, `ready.json`, logs) |
+   | `~/.windows-mcp/sandbox/cache` | `C:\mcp\cache` | read-write (uv, Python, wheels) |
+   | this checkout (when run from source) | `C:\mcp\source` | **read-only** |
+   | `~/.windows-mcp/sandbox/profile` (`--keep-profile`) | `C:\mcp\profile` | read-write |
+
+   Nothing else on the host is visible inside the sandbox.
+3. The logon script [`bootstrap.ps1`](src/windows_mcp/sandbox/bootstrap.ps1) installs uv and
+   starts `serve --transport streamable-http` with the key and an IP allowlist limited to the
+   host's virtual switch subnet, then writes `ready.json` with the address.
+4. `sandbox start` waits for `ready.json` and prints the client entry. Logs are in
+   `~/.windows-mcp/sandbox/shared/logs`.
+
+Settings the sandbox applies, because nobody sits at that session:
+
+| Setting | In the sandbox | Why |
+|---|---|---|
+| `control.consent_countdown_seconds` | `0` | No consent prompt before the agent takes the desktop. |
+| `control.mouse_takeover` | `false` | A stray mouse movement does not stop the agent; the keyboard and `Ctrl+Alt+Shift+Backspace` still take control back. |
+| `WINDOWS_MCP_VISION_MODE` | `image` | A fresh sandbox has no OCR language packs, so screenshots are returned as images. |
+
+### Logins, MFA and CAPTCHA
+
+The sandbox is an ordinary window on your desktop. When the agent reaches a sign-in page it
+should stop and ask you in chat: click into the sandbox window, sign in, and tell the agent to
+continue (it can resume with `WaitFor`). Your input inside the sandbox never touches the host.
+
+The sandbox is disposable: closing it drops every session and cookie. With `--keep-profile`,
+start the browser with `--user-data-dir=C:\mcp\profile` to keep logins between runs. That
+folder then holds live session cookies on the host, so protect it, and **never map your real
+browser profile**. Toast notifications from the `Notification` tool show inside the sandbox,
+not on the host.
+
+### Keep the window open
+
+The sandbox is an RDP-style session: when its window is minimized, or with `--headless` and no
+window, Windows may stop rendering it (black screenshots, input fails). Leaving it behind other
+windows or on another virtual desktop works.
+
+### Other separate sessions
+
+`bootstrap.ps1` takes `-Shared`, `-Source`, `-Cache`, `-Port` and `-Allowlist`, so it also serves
+as the logon script of a dedicated user in a Hyper-V VM or on a Windows Server with RDS. An RDP
+session to a second user on the *same* Windows 11 Pro/Home PC does not work: client editions
+allow one interactive session, so it signs you out of the console (patching `termsrv.dll` to
+lift that breaks the license and is not supported).
 
 ## 🔐 Security & Access Control
 
@@ -1070,6 +1161,10 @@ We appreciate every contribution, whether it's code, documentation, bug reports,
 ## 🔒 Security
 
 **Important**: Windows-MCP operates with full system access and can perform irreversible operations. Please review our comprehensive security guidelines before deployment.
+
+**Recommended deployment:** run the server in [Windows Sandbox Mode](#-windows-sandbox-mode-recommended)
+(`windows-mcp sandbox start`), in a VM, or in a dedicated user session, never with access to
+data you cannot afford to lose. `--exclude-tools` further removes tools a deployment does not need.
 
 For detailed security information, including:
 - Tool-specific risk assessments
