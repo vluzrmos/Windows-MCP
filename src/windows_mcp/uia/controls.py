@@ -16,7 +16,6 @@ from __future__ import annotations
 import os
 import sys
 import time
-import datetime
 import re
 import threading
 import ctypes
@@ -28,7 +27,6 @@ from .enums import *
 from .core import *
 from .core import _AutomationClient, _get_system_dpi
 from .patterns import *
-from .exceptions import from_com_error, UIAException
 
 
 METRO_WINDOW_CLASS_NAME = "Windows.UI.Core.CoreWindow"  # for Windows 8 and 8.1
@@ -1747,9 +1745,6 @@ class Control:
             if printIfNotExist or DEBUG_EXIST_DISAPPEAR:
                 pass
             return False
-        startTime2 = ProcessTime()
-        if DEBUG_SEARCH_TIME:
-            startDateTime = datetime.datetime.now()
         while True:
             control = FindControl(
                 self.searchFromControl,
@@ -6083,7 +6078,6 @@ def LogControl(
     depth: int, current depth.
     showAllName: bool, if False, print the first 30 characters of control.Name.
     """
-    indent = " " * depth * 4
     if showPid:
         pass
     supportedPatterns = list(
@@ -6264,7 +6258,7 @@ def RunByHotKey(
             WaitHotKeyReleased(hotkey)
         try:
             function(stopEvent)
-        except Exception as ex:
+        except Exception:
             print(traceback.format_exc())
         finally:
             releaseAllKeys()  # need to release keys if some keys were pressed

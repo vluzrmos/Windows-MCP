@@ -1,7 +1,7 @@
 """UIA exception hierarchy for typed error handling."""
 
 from _ctypes import COMError  # noqa: F401 — re-exported for callers
-from .enums import UIAError, is_dead_element_error, is_retryable_error, is_timeout_error
+from .enums import UIAError, is_timeout_error
 
 
 class UIAException(Exception):

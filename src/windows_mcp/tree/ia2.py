@@ -43,7 +43,7 @@ def _iaccessible():
         from ctypes import wintypes
 
         import comtypes  # noqa: F401  (forces COM module init)
-        import comtypes.client
+        import comtypes.client  # noqa: F401  (loaded before safe_get_module runs)
         from comtypes import GUID
 
         from windows_mcp.uia.comtypes_cache import safe_get_module

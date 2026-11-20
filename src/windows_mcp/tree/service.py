@@ -775,7 +775,7 @@ class Tree:
 
                                 if is_role_interactive and (is_default_action or is_keyboard_focusable):
                                     is_interactive = True
-                                
+
                         if isinstance(node,DocumentControl):
                             is_interactive=True
 
@@ -887,7 +887,7 @@ class Tree:
                                     metadata['value']=value.strip() if value else '(empty)'
                                 except Exception:
                                     pass
-                                
+
                                 try:
                                     control_state=node.GetCachedPropertyValue(PropertyId.ExpandCollapseExpandCollapseStateProperty)
                                     match control_state:

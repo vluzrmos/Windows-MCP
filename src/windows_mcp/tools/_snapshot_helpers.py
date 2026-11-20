@@ -10,7 +10,7 @@ import logging
 import os
 import time
 
-from typing import Callable, Literal
+from typing import Literal
 from fastmcp.utilities.types import Image
 from textwrap import dedent
 from windows_mcp.desktop.service import Desktop, Size
@@ -156,9 +156,8 @@ def capture_desktop_state(
 
     resolution_mode = _normalize_resolution(resolution)
     image_format = "jpeg" if resolution_mode == "compact" else "png"
-    max_size_resolver: Callable[[int, int], Size] = (
-        lambda w, h: _resolve_max_image_size(resolution_mode, w, h)
-    )
+    def max_size_resolver(w: int, h: int) -> Size:
+        return _resolve_max_image_size(resolution_mode, w, h)
 
     display_indices = Desktop.parse_display_selection(display)
 
